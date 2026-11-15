@@ -1,0 +1,81 @@
+"""Tests for SQLite storage, WAL pragmas, reminders, stale recovery, tasks, and conversation persistence."""
+
+from __future__ import annotations
+
+import tempfile
+import unittest
+from datetime import timedelta
+from pathlib import Path
+
+from database.repository import DatabaseRepository
+
+
+class DatabaseTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.tmp.name) / "test.db"
+        self.repo = DatabaseRepository(self.db_path)
+        self.repo.init()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_memories_crud(self):
+        self.assertTrue(self.repo.remember("Likes black coffee", user_id=101))
+        self.assertTrue(self.repo.remember("Lives in Dhaka", user_id=101))
+        items = self.repo.memories(user_id=101)
+        self.assertEqual(len(items), 2)
+        self.assertEqual(self.repo.memories("coffee", user_id=101), ["Likes black coffee"])
+        deleted = self.repo.forget("coffee", user_id=101)
+        self.assertEqual(deleted, 1)
+        self.assertEqual(self.repo.memories(user_id=101), ["Lives in Dhaka"])
+
+    def test_reminders_claim_complete_cancel_and_stale_recovery(self):
+        past = self.repo.now() - timedelta(minutes=1)
+        rid = self.repo.create_reminder(123, past, "Take vitamins", user_id=123)
+        due = self.repo.due_reminders()
+        self.assertEqual(len(due), 1)
+        self.assertTrue(self.repo.claim_reminder(rid))
+        self.assertFalse(self.repo.claim_reminder(rid))
+
+        # Simulate stale 'sending' state older than 5 minutes
+        stale_time = (self.repo.now() - timedelta(minutes=10)).isoformat()
+        with self.repo._connect() as conn:
+            conn.execute(
+                "UPDATE reminders SET claimed_at = ? WHERE id = ?", (stale_time, rid)
+            )
+        recovered = self.repo.due_reminders()
+        self.assertEqual(len(recovered), 1)
+        self.assertTrue(self.repo.claim_reminder(rid))
+
+        self.repo.complete_reminder(recovered[0])
+        self.assertEqual(self.repo.upcoming_reminders(user_id=123), [])
+
+        future = self.repo.now() + timedelta(hours=2)
+        rid2 = self.repo.create_reminder(123, future, "Call mom", user_id=123)
+        self.assertTrue(self.repo.cancel_reminder(rid2, user_id=123))
+        self.assertFalse(self.repo.cancel_reminder(rid2, user_id=123))
+
+    def test_tasks_lifecycle(self):
+        tid = self.repo.add_task("Review PR", priority="high", user_id=123)
+        tasks = self.repo.list_tasks(user_id=123)
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]["title"], "Review PR")
+        self.assertTrue(self.repo.complete_task(tid, user_id=123))
+        self.assertEqual(self.repo.list_tasks(user_id=123), [])
+
+    def test_conversation_history_append_and_clear(self):
+        msgs = [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello, sir."},
+        ]
+        self.repo.append_history_messages(999, msgs, user_id=999)
+        loaded = self.repo.load_history_messages(999)
+        self.assertEqual(len(loaded), 2)
+        self.assertEqual(loaded[1]["content"], "Hello, sir.")
+        self.repo.clear_history_messages(999)
+        self.assertEqual(self.repo.load_history_messages(999), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

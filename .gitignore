@@ -1,0 +1,38 @@
+# Secrets & credentials (NEVER commit!)
+.env
+*.env
+*.pem
+*.key
+
+# SQLite database & local logs
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.log
+
+# Python cache & build
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Playwright & browser artifacts
+.playwright/
+test-results/
+
+# Temporary files & archives
+*.zip
+jarvis_rebuild/
+scratch/
+$RECYCLE.BIN/
+System Volume Information/
+.vscode/
+.idea/
