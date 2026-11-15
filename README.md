@@ -27,8 +27,8 @@ Some optional integrations require separate accounts and credentials.
 Clone the repository, or download and extract its ZIP:
 
 ``` bash
-git clone https://github.com/YOUR_USERNAME/YOUR_REPOSITORY.git
-cd YOUR_REPOSITORY
+git clone https://github.com/ayanzaman1818-cell/J.A.R.V.I.S-Telegram-.git
+cd J.A.R.V.I.S-Telegram-.git
 ```
 
 ### 2. Create a virtual environment
