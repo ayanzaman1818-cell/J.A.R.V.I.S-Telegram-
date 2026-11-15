@@ -22,12 +22,15 @@ class ToolValidationTests(unittest.IsolatedAsyncioTestCase):
         self.p1 = patch("tools.productivity.db", self.repo)
         self.p2 = patch("tools.memory_tools.db", self.repo)
         self.p3 = patch("tools.integrations.db", self.repo)
+        self.p4 = patch("tools.tracker.db", self.repo)
         self.p1.start()
         self.p2.start()
         self.p3.start()
+        self.p4.start()
         self.addCleanup(self.p1.stop)
         self.addCleanup(self.p2.stop)
         self.addCleanup(self.p3.stop)
+        self.addCleanup(self.p4.stop)
         self.addCleanup(self.tmp.cleanup)
         self.ctx = ToolContext(bot=None, chat_id=777, user_id=777)
 
@@ -76,6 +79,40 @@ class ToolValidationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Confirmation required", prep)
         bad = await tools.run_tool(self.ctx, "confirm_action", {"token": "wrong"})
         self.assertIn("No matching or active pending action", bad)
+
+    async def test_expense_and_habit_tools(self):
+        exp = await tools.run_tool(
+            self.ctx,
+            "log_expense",
+            {"amount": 320, "currency": "BDT", "category": "food", "note": "Lunch"},
+        )
+        self.assertIn("Logged expense #1", exp)
+        rep = await tools.run_tool(self.ctx, "expense_report", {"days": 30})
+        self.assertIn("320.0 BDT", rep)
+
+        hab = await tools.run_tool(
+            self.ctx,
+            "log_habit",
+            {"habit": "reading", "value": 25, "unit": "pages"},
+        )
+        self.assertIn("Logged habit #1", hab)
+        h_rep = await tools.run_tool(self.ctx, "habit_report", {"days": 7})
+        self.assertIn("reading: 25.0 pages", h_rep)
+
+    async def test_youtube_id_extraction_and_pc_status(self):
+        from tools.youtube import extract_video_id
+
+        self.assertEqual(
+            extract_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+            "dQw4w9WgXcQ",
+        )
+        self.assertEqual(
+            extract_video_id("https://youtu.be/dQw4w9WgXcQ?t=10"),
+            "dQw4w9WgXcQ",
+        )
+        with patch("config.OWNER_ID", 777):
+            status = await tools.run_tool(self.ctx, "pc_status", {})
+            self.assertIn("Host OS:", status)
 
 
 if __name__ == "__main__":

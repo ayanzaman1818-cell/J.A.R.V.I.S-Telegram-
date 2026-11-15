@@ -339,6 +339,35 @@ Open Telegram, find the bot created with BotFather, and send `/start`
 
 Press `Ctrl+C` in the terminal to stop Jarvis.
 
+## Features & Commands
+
+### Core & New Capabilities
+
+- **Vision & Document Analysis:** Send photos, screenshots, or PDF/text files directly in Telegram with an optional caption to analyze receipts, debug code screenshots, extract text, or summarize documents.
+- **PC / Desktop Remote Control:** Check CPU/RAM/Disk/Battery and top processes, capture live desktop screenshots, control system volume/media keys, launch desktop apps, or lock your Windows workstation remotely.
+- **YouTube Video Summarizer:** Paste any YouTube link (including Shorts) and ask JARVIS to summarize or answer questions from the video transcript.
+- **Spotify & Desktop Media Control:** Check the currently playing Spotify track, play/pause/skip tracks, or search and launch songs directly in Spotify.
+- **Expense & Habit Tracker:** Log daily spending and habits in natural language, view 7-day/30-day category breakdowns, track habit streaks, and receive automatic summaries in your morning briefing.
+- **Interactive Inline Buttons:** Mark tasks done, snooze reminders (`+15m` / `+1h`), cancel reminders, or approve/cancel pending actions with one-tap inline Telegram buttons.
+
+### Telegram Slash Commands
+
+| Command | Description |
+| :--- | :--- |
+| `/start`, `/help` | Display welcome guide and available commands |
+| `/status` | Check system health, configured models, and integration status |
+| `/briefing` | Generate an on-demand morning briefing (weather, tasks, reminders, expenses, habits, news) |
+| `/tasks` | List open tasks with one-tap `✅ Done` inline buttons |
+| `/reminders` | List pending reminders with one-tap `❌ Cancel` inline buttons |
+| `/expenses` | View your 30-day expense breakdown and recent transactions |
+| `/habits`, `/stats` | View your 30-day habit streaks and completion stats |
+| `/pc`, `/pcstatus` | Check live Windows PC CPU, RAM, disk, battery, and top processes |
+| `/lock` | Immediately lock your Windows workstation |
+| `/memory` | Inspect stored long-term memories and preferences |
+| `/audit` | View recent tool execution audit logs |
+| `/confirm`, `/cancel` | Confirm or cancel a pending high-impact action |
+| `/clear` | Clear current conversation context |
+
 ## Optional integrations
 
 ### Gmail, Google Drive, and Calendar

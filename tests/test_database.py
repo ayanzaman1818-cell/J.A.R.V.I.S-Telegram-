@@ -76,6 +76,23 @@ class DatabaseTests(unittest.TestCase):
         self.repo.clear_history_messages(999)
         self.assertEqual(self.repo.load_history_messages(999), [])
 
+    def test_expenses_and_habits_and_snooze(self):
+        eid = self.repo.add_expense(450.0, currency="BDT", category="groceries", note="Eggs & milk", user_id=501)
+        self.assertGreater(eid, 0)
+        summary = self.repo.expense_summary(days=30, user_id=501)
+        self.assertEqual(summary["totals"][0]["total"], 450.0)
+        self.assertTrue(self.repo.delete_expense(eid, user_id=501))
+
+        hid = self.repo.log_habit("workout", value=30, unit="mins", user_id=501)
+        self.assertGreater(hid, 0)
+        habits = self.repo.habit_summary(days=7, user_id=501)
+        self.assertEqual(len(habits), 1)
+        self.assertEqual(habits[0]["total_value"], 30.0)
+
+        rid = self.repo.create_reminder(501, self.repo.now(), "Drink water", user_id=501)
+        snoozed = self.repo.snooze_reminder(rid, minutes=15, user_id=501)
+        self.assertIsNotNone(snoozed)
+
 
 if __name__ == "__main__":
     unittest.main()
