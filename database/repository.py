@@ -13,6 +13,8 @@ from typing import Any, Iterator
 
 import config
 from database.models import (
+    ExpenseItem,
+    HabitItem,
     MemoryItem,
     PendingAction,
     ReminderItem,
@@ -132,6 +134,31 @@ class DatabaseRepository:
                     event TEXT NOT NULL,
                     detail TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS expenses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL DEFAULT {default_owner},
+                    amount REAL NOT NULL,
+                    currency TEXT NOT NULL DEFAULT 'BDT',
+                    category TEXT NOT NULL DEFAULT 'general',
+                    note TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_expenses_user_created
+                    ON expenses(user_id, created_at);
+
+                CREATE TABLE IF NOT EXISTS habits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL DEFAULT {default_owner},
+                    habit TEXT NOT NULL,
+                    value REAL NOT NULL DEFAULT 1.0,
+                    unit TEXT NOT NULL DEFAULT 'count',
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_habits_user_created
+                    ON habits(user_id, created_at);
                 """
             )
 
@@ -516,6 +543,209 @@ class DatabaseRepository:
             self.audit("reminder_cancelled", f"#{reminder_id}", user_id=uid)
             return True
         return False
+
+    def snooze_reminder(
+        self,
+        reminder_id: int,
+        minutes: int = 10,
+        user_id: int | None = None,
+    ) -> datetime | None:
+        uid = self._resolve_user_id(user_id)
+        due = self.now() + timedelta(minutes=max(1, int(minutes)))
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM reminders WHERE id = ? AND (user_id = ? OR chat_id = ?)",
+                (int(reminder_id), uid, uid),
+            ).fetchone()
+            if not row:
+                return None
+            conn.execute(
+                """UPDATE reminders
+                   SET active = 1,
+                       delivery_state = 'pending',
+                       due_at = ?,
+                       claimed_at = NULL,
+                       last_error = NULL
+                   WHERE id = ?""",
+                (due.isoformat(), int(reminder_id)),
+            )
+        self.audit(
+            "reminder_snoozed",
+            f"#{reminder_id} +{minutes}m -> {due.isoformat()}",
+            user_id=uid,
+        )
+        return due
+
+    def get_latest_pending_action(self, chat_id: int) -> PendingAction | None:
+        now_ts = time.time()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM pending_actions WHERE expires_at < ?", (now_ts,))
+            row = conn.execute(
+                """SELECT * FROM pending_actions
+                   WHERE chat_id = ? AND expires_at >= ?
+                   ORDER BY created_at DESC LIMIT 1""",
+                (chat_id, now_ts),
+            ).fetchone()
+        if not row:
+            return None
+        return PendingAction(
+            token=row["token"],
+            user_id=row["user_id"],
+            chat_id=row["chat_id"],
+            kind=row["kind"],
+            payload=json.loads(row["payload"]),
+            summary=row["summary"],
+            expires_at=float(row["expires_at"]),
+            created_at=row["created_at"],
+        )
+
+    def add_expense(
+        self,
+        amount: float,
+        currency: str = "BDT",
+        category: str = "general",
+        note: str = "",
+        user_id: int | None = None,
+    ) -> int:
+        uid = self._resolve_user_id(user_id)
+        norm_curr = (currency or "BDT").strip().upper() or "BDT"
+        norm_cat = (category or "general").strip().lower() or "general"
+        with self._connect() as conn:
+            cur = conn.execute(
+                """INSERT INTO expenses(user_id, amount, currency, category, note, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    uid,
+                    float(amount),
+                    norm_curr,
+                    norm_cat,
+                    note.strip(),
+                    self.now().isoformat(),
+                ),
+            )
+            exp_id = int(cur.lastrowid)
+        self.audit(
+            "expense_logged",
+            f"#{exp_id} {amount} {norm_curr} [{norm_cat}] {note}",
+            user_id=uid,
+        )
+        return exp_id
+
+    def list_expenses(
+        self,
+        days: int = 30,
+        category: str = "",
+        limit: int = 25,
+        user_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        uid = self._resolve_user_id(user_id)
+        cutoff = (self.now() - timedelta(days=max(1, int(days)))).isoformat()
+        with self._connect() as conn:
+            if category.strip():
+                rows = conn.execute(
+                    """SELECT * FROM expenses
+                       WHERE user_id = ? AND created_at >= ? AND LOWER(category) = LOWER(?)
+                       ORDER BY id DESC LIMIT ?""",
+                    (uid, cutoff, category.strip(), limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT * FROM expenses
+                       WHERE user_id = ? AND created_at >= ?
+                       ORDER BY id DESC LIMIT ?""",
+                    (uid, cutoff, limit),
+                ).fetchall()
+        return [
+            ExpenseItem(
+                id=row["id"],
+                user_id=row["user_id"],
+                amount=float(row["amount"]),
+                currency=row["currency"],
+                category=row["category"],
+                note=row["note"],
+                created_at=row["created_at"],
+            ).to_dict()
+            for row in rows
+        ]
+
+    def expense_summary(
+        self, days: int = 30, user_id: int | None = None
+    ) -> dict[str, Any]:
+        uid = self._resolve_user_id(user_id)
+        cutoff = (self.now() - timedelta(days=max(1, int(days)))).isoformat()
+        with self._connect() as conn:
+            by_cat = conn.execute(
+                """SELECT currency, category, ROUND(SUM(amount), 2) AS total, COUNT(*) AS count
+                   FROM expenses
+                   WHERE user_id = ? AND created_at >= ?
+                   GROUP BY currency, category
+                   ORDER BY total DESC""",
+                (uid, cutoff),
+            ).fetchall()
+            totals = conn.execute(
+                """SELECT currency, ROUND(SUM(amount), 2) AS total, COUNT(*) AS count
+                   FROM expenses
+                   WHERE user_id = ? AND created_at >= ?
+                   GROUP BY currency""",
+                (uid, cutoff),
+            ).fetchall()
+        return {
+            "days": int(days),
+            "totals": [dict(r) for r in totals],
+            "by_category": [dict(r) for r in by_cat],
+        }
+
+    def delete_expense(self, expense_id: int, user_id: int | None = None) -> bool:
+        uid = self._resolve_user_id(user_id)
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM expenses WHERE id = ? AND user_id = ?",
+                (int(expense_id), uid),
+            )
+        if cur.rowcount:
+            self.audit("expense_deleted", f"#{expense_id}", user_id=uid)
+            return True
+        return False
+
+    def log_habit(
+        self,
+        habit: str,
+        value: float = 1.0,
+        unit: str = "count",
+        user_id: int | None = None,
+    ) -> int:
+        uid = self._resolve_user_id(user_id)
+        norm_habit = habit.strip().lower()
+        norm_unit = (unit or "count").strip() or "count"
+        with self._connect() as conn:
+            cur = conn.execute(
+                """INSERT INTO habits(user_id, habit, value, unit, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (uid, norm_habit, float(value), norm_unit, self.now().isoformat()),
+            )
+            habit_id = int(cur.lastrowid)
+        self.audit(
+            "habit_logged",
+            f"#{habit_id} {norm_habit}: {value} {norm_unit}",
+            user_id=uid,
+        )
+        return habit_id
+
+    def habit_summary(
+        self, days: int = 7, user_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        uid = self._resolve_user_id(user_id)
+        cutoff = (self.now() - timedelta(days=max(1, int(days)))).isoformat()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT habit, unit, ROUND(SUM(value), 2) AS total_value, COUNT(*) AS entries
+                   FROM habits
+                   WHERE user_id = ? AND created_at >= ?
+                   GROUP BY habit, unit
+                   ORDER BY entries DESC, habit ASC""",
+                (uid, cutoff),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def create_pending_action(
         self,

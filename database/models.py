@@ -91,6 +91,48 @@ class AuditEntry:
 
 
 @dataclass(slots=True)
+class ExpenseItem:
+    id: int
+    user_id: int
+    amount: float
+    currency: str
+    category: str
+    note: str
+    created_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "amount": self.amount,
+            "currency": self.currency,
+            "category": self.category,
+            "note": self.note,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(slots=True)
+class HabitItem:
+    id: int
+    user_id: int
+    habit: str
+    value: float
+    unit: str
+    created_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "habit": self.habit,
+            "value": self.value,
+            "unit": self.unit,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(slots=True)
 class SystemStatus:
     memories: int
     open_tasks: int
