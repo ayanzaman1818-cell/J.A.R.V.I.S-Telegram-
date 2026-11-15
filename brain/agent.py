@@ -50,7 +50,9 @@ Personality: dry British wit, calm, competent, never grovelling. Understated hum
 Current time: {now}. User's home location: {config.LOCATION}.
 
 How to work:
-- You have tools for web search, reading pages, a real browser, tech news, weather, voice notes, phone calls, persistent reminders, tasks, Calendar, Gmail, Drive and memory. USE them rather than guessing. For anything current, search first.
+- You have tools for web search, reading pages, a real browser, YouTube video transcripts, tech news, weather, voice notes, phone calls, PC remote control (status, desktop screenshot, volume/media, lock, app launcher), Spotify playback, expense & habit tracking, persistent reminders, tasks, Calendar, Gmail, Drive and memory. USE them rather than guessing. For anything current, search first.
+- When given a YouTube URL or video ID, call youtube_transcript first to retrieve the video's title, description, and timestamped transcript.
+- When the user shares an expense (or a photo of a receipt/bill) or logs a habit/workout, use log_expense or log_habit.
 - For a product price, cost, or cheapest-place question, use price_lookup first. It is deliberately faster than broad research. Answer from its store snippets and links; do not open extra retailer pages unless the user asks for deeper verification or specifications.
 - For every request about the user's schedule, appointments, holidays, availability, or Calendar, call a Calendar tool before answering. Never answer a Calendar question from memory. Treat a successful Calendar result as authoritative; do not call web search unless the user explicitly asks for public information outside their calendar or Calendar reports an error.
 - For multi-step tasks, chain tools until the job is done, then report the result.
@@ -100,10 +102,21 @@ async def _fast_price_answer(text: str, result: str, user_id: int | None = None)
     return response_text(resp)
 
 
-async def respond(ctx: ToolContext, text: str) -> str:
+async def respond(
+    ctx: ToolContext,
+    text: str,
+    *,
+    media_bytes: bytes | None = None,
+    mime_type: str | None = None,
+) -> str:
     request_started = time.perf_counter()
     user_id = getattr(ctx, "user_id", None) or ctx.chat_id
-    log.info("Incoming assistant request: chat_id=%s chars=%s", ctx.chat_id, len(text))
+    log.info(
+        "Incoming assistant request: chat_id=%s chars=%s media=%s",
+        ctx.chat_id,
+        len(text),
+        mime_type or "none",
+    )
     lock = _chat_lock(ctx.chat_id)
     lock_started = time.perf_counter()
     async with lock:
@@ -113,10 +126,11 @@ async def respond(ctx: ToolContext, text: str) -> str:
 
         hist = _get_history(ctx.chat_id)
         start = len(hist)
-        hist.append({"role": "user", "content": text})
+        stored_text = f"[Attached {mime_type}] {text}".strip() if mime_type else text
+        hist.append({"role": "user", "content": stored_text})
 
         try:
-            if _looks_like_price_request(text):
+            if not media_bytes and _looks_like_price_request(text):
                 log.info("Fast price lookup path: chat_id=%s", ctx.chat_id)
                 result = await tools.price_lookup(ctx, text)
                 answer = await _fast_price_answer(text, result, user_id=user_id)
@@ -139,6 +153,8 @@ async def respond(ctx: ToolContext, text: str) -> str:
                 response = await chat(
                     [{"role": "system", "content": system_prompt(user_id=user_id)}] + hist,
                     force_model=config.LLM_FAST_MODEL if has_tool_results else None,
+                    media_bytes=media_bytes,
+                    mime_type=mime_type,
                 )
                 tool_calls = response_tool_calls(response)
                 answer_text = response_text(response)

@@ -316,6 +316,8 @@ async def chat(
     *,
     use_tools: bool = True,
     force_model: str | None = None,
+    media_bytes: bytes | None = None,
+    mime_type: str | None = None,
 ):
     global _primary_down_until
     if get_client() is None:
@@ -331,6 +333,17 @@ async def chat(
         config.LLM_DEEP_MODEL if len(user_text) > 600 else config.LLM_FAST_MODEL
     )
     system_instruction, contents = history_to_gemini(messages)
+
+    if media_bytes and mime_type:
+        media_part = types.Part.from_bytes(data=media_bytes, mime_type=mime_type)
+        attached = False
+        for item in reversed(contents):
+            if item.get("role") == "user" and any("text" in p for p in item.get("parts", [])):
+                item["parts"].append(media_part)
+                attached = True
+                break
+        if not attached:
+            contents.append({"role": "user", "parts": [media_part]})
 
     request_config: dict[str, Any] = {
         "system_instruction": system_instruction,

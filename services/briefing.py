@@ -33,6 +33,16 @@ async def build_briefing(ctx: ToolContext) -> str:
     inbox_txt = inbox if not isinstance(inbox, Exception) else "Inbox unavailable."
     reminders = db.upcoming_reminders(limit=10, user_id=ctx.user_id)
     reminder_text = "\n".join(f"- {r['due_at']}: {r['message']}" for r in reminders) or "None."
+    exp_sum = db.expense_summary(days=7, user_id=ctx.user_id)
+    exp_text = (
+        ", ".join(f"{t['total']} {t['currency']} ({t['count']} items)" for t in exp_sum["totals"])
+        or "None logged in last 7 days."
+    )
+    habits = db.habit_summary(days=7, user_id=ctx.user_id)
+    habit_text = (
+        ", ".join(f"{h['habit']}: {h['total_value']} {h['unit']}" for h in habits)
+        or "None logged in last 7 days."
+    )
     today = datetime.now(config.get_zoneinfo()).strftime("%A %d %B")
 
     prompt = f"""Deliver the user's morning debrief for {today}.
@@ -52,11 +62,18 @@ Unread email data:
 Upcoming reminders:
 {reminder_text}
 
+7-day expenses:
+{exp_text}
+
+7-day habits:
+{habit_text}
+
 Format: a brief greeting in character, then one line on the weather with a practical tip
 (umbrella, jacket, etc.), then today's appointments and reminders if present, a one-line
-unread-email priority, then the 5 most important or interesting tech stories, each one
-line plus its link. Pick variety over repetition across sources. Close by asking if there
-is anything he'd like you to dig into. Under 280 words. Plain text only, no markdown."""
+unread-email priority, a quick note on 7-day expenses/habits if any exist, then the 5 most
+important or interesting tech stories, each one line plus its link. Pick variety over
+repetition across sources. Close by asking if there is anything he'd like you to dig into.
+Under 280 words. Plain text only, no markdown."""
     return await agent.simple(prompt, user_id=ctx.user_id)
 
 
