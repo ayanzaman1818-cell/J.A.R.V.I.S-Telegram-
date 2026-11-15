@@ -6,6 +6,8 @@ import logging
 from datetime import time as dtime
 from typing import Any
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
 import config
 from database.repository import db
 from services import briefing, voice
@@ -27,8 +29,23 @@ async def check_persistent_reminders(context: Any) -> None:
             continue
 
         try:
+            markup = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "✅ Done", callback_data=f"rem_done:{reminder_id}"
+                        ),
+                        InlineKeyboardButton(
+                            "💤 Snooze 10m",
+                            callback_data=f"rem_snooze:{reminder_id}:10",
+                        ),
+                    ]
+                ]
+            )
             await context.bot.send_message(
-                reminder["chat_id"], f"Reminder: {reminder['message']}"
+                reminder["chat_id"],
+                f"Reminder: {reminder['message']}",
+                reply_markup=markup,
             )
         except Exception as exc:
             try:

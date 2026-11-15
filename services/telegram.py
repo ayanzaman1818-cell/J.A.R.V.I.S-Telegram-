@@ -1,4 +1,4 @@
-"""Professional Telegram interface for JARVIS with non-blocking execution and user isolation."""
+"""Professional Telegram interface for JARVIS with non-blocking execution, vision/document support, and interactive inline buttons."""
 
 from __future__ import annotations
 
@@ -9,10 +9,16 @@ import os
 import time
 from typing import Any, Callable, Coroutine
 
-from telegram import BotCommand, Update
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -24,7 +30,7 @@ from database.repository import db
 
 log = logging.getLogger("jarvis.telegram")
 
-AgentResponder = Callable[[Any, str], Coroutine[Any, Any, str]]
+AgentResponder = Callable[..., Coroutine[Any, Any, str]]
 ResetHandler = Callable[[int], Any]
 BriefingSender = Callable[[Any, int, Any], Coroutine[Any, Any, None]]
 PhoneCaller = Callable[[str], Coroutine[Any, Any, str]]
@@ -34,7 +40,7 @@ ComposioChecker = Callable[[], bool]
 
 
 class TelegramService:
-    """Manages Telegram bot commands, text/voice handlers, typing indicators, and authorization."""
+    """Manages Telegram bot commands, text/voice/photo/document handlers, inline callbacks, and authorization."""
 
     def __init__(
         self,
@@ -102,14 +108,44 @@ class TelegramService:
                 continue
 
     @staticmethod
-    async def send_long(bot: Any, chat_id: int, text: str) -> None:
+    def _confirmation_markup(chat_id: int, text: str) -> InlineKeyboardMarkup | None:
+        """Attach Approve / Cancel buttons if a pending action token is referenced in the reply."""
+        pending = db.get_latest_pending_action(chat_id)
+        if not pending or pending.token not in (text or ""):
+            return None
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "✅ Approve", callback_data=f"act_ok:{pending.token}"
+                    ),
+                    InlineKeyboardButton(
+                        "❌ Cancel", callback_data=f"act_no:{pending.token}"
+                    ),
+                ]
+            ]
+        )
+
+    @classmethod
+    async def send_long(
+        cls,
+        bot: Any,
+        chat_id: int,
+        text: str,
+        reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> None:
         """Split responses longer than 4,000 characters and retry transient Telegram network errors."""
         payload = (text or "").strip() or "(No response generated.)"
-        for i in range(0, len(payload), 4000):
-            chunk = payload[i : i + 4000]
+        markup = reply_markup or cls._confirmation_markup(chat_id, payload)
+        chunks = [payload[i : i + 4000] for i in range(0, len(payload), 4000)]
+        for idx, chunk in enumerate(chunks):
+            is_last = idx == len(chunks) - 1
+            chunk_markup = markup if is_last else None
             for attempt in range(3):
                 try:
-                    await bot.send_message(chat_id, chunk)
+                    await bot.send_message(
+                        chat_id, chunk, reply_markup=chunk_markup
+                    )
                     break
                 except Exception:
                     if attempt == 2:
@@ -129,14 +165,16 @@ class TelegramService:
         if not update.message:
             return
         await update.message.reply_text(
-            f"At your service, {config.USER_NAME}. Ask me anything, or use:\n"
+            f"At your service, {config.USER_NAME}. Ask me anything, send a photo/document/YouTube link, or use:\n"
             "/help - show all available commands\n"
             "/briefing - morning debrief right now\n"
-            "/tasks - view your open tasks\n"
-            "/reminders - view upcoming reminders\n"
+            "/tasks - view & complete open tasks\n"
+            "/reminders - view & manage reminders\n"
+            "/expenses - view 30-day expense report\n"
+            "/habits - view 7-day habit streaks\n"
+            "/pc - check PC status & quick remote controls\n"
             "/memory - view saved memories & preferences\n"
             "/status - check system health & model settings\n"
-            "/model - inspect Gemini model routing & cooldowns\n"
             "/reset - clear short-term conversation context"
         )
 
@@ -154,8 +192,12 @@ class TelegramService:
             "/status - display system health, models, and database counts\n"
             "/model - inspect active Gemini models and circuit-breaker status\n"
             "/memory (or /memories) - list remembered facts and user preferences\n"
-            "/tasks - list open personal tasks\n"
-            "/reminders - list active scheduled reminders\n"
+            "/tasks - list open personal tasks with quick-complete buttons\n"
+            "/reminders - list active scheduled reminders with cancel buttons\n"
+            "/expenses - view 30-day expense breakdown\n"
+            "/habits (or /stats) - view habit logs and expense summary\n"
+            "/pc (or /pcstatus) - PC hardware status and remote control buttons\n"
+            "/lock - lock your Windows PC immediately (owner only)\n"
             "/briefing - generate and deliver your daily briefing now\n"
             "/call <message> - ring your phone with a spoken message (owner only)\n"
             "/myid - display your numeric Telegram user ID"
@@ -240,8 +282,18 @@ class TelegramService:
             for t in tasks
         ]
         text = "\n".join(lines) or "No open tasks."
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    f"✅ Complete #{t['id']}: {t['title'][:28]}",
+                    callback_data=f"task_done:{t['id']}",
+                )
+            ]
+            for t in tasks[:8]
+        ]
+        markup = InlineKeyboardMarkup(buttons) if buttons else None
         if update.message:
-            await update.message.reply_text(text)
+            await update.message.reply_text(text, reply_markup=markup)
 
     async def cmd_reminders(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
@@ -254,8 +306,74 @@ class TelegramService:
             call_flag = " [call]" if r.get("call") else ""
             lines.append(f"#{r['id']} {r['due_at']}{rec}{call_flag}: {r['message']}")
         text = "\n".join(lines) or "No active reminders."
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    f"❌ Cancel #{r['id']}: {r['message'][:28]}",
+                    callback_data=f"rem_cancel:{r['id']}",
+                )
+            ]
+            for r in reminders[:8]
+        ]
+        markup = InlineKeyboardMarkup(buttons) if buttons else None
         if update.message:
-            await update.message.reply_text(text)
+            await update.message.reply_text(text, reply_markup=markup)
+
+    async def cmd_expenses(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_authorized(update) or not update.message:
+            return
+        from tools.tracker import expense_report
+
+        ctx = self._make_ctx(context, update.effective_chat.id, update.effective_user.id)
+        text = await expense_report(ctx, days=30)
+        await update.message.reply_text(text)
+
+    async def cmd_habits(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_authorized(update) or not update.message:
+            return
+        from tools.tracker import expense_report, habit_report
+
+        ctx = self._make_ctx(context, update.effective_chat.id, update.effective_user.id)
+        h_text = await habit_report(ctx, days=7)
+        e_text = await expense_report(ctx, days=7)
+        await update.message.reply_text(f"{h_text}\n\n{e_text}")
+
+    async def cmd_pc(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_owner(update):
+            if update.message:
+                await update.message.reply_text("Only the bot owner can access PC controls.")
+            return
+        if not update.message:
+            return
+        from tools.pc_control import pc_status
+
+        ctx = self._make_ctx(context, update.effective_chat.id, update.effective_user.id)
+        status_text = await pc_status(ctx)
+        markup = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("📸 Screenshot", callback_data="pc_act:screenshot"),
+                    InlineKeyboardButton("⏯ Play/Pause", callback_data="pc_act:play_pause"),
+                ],
+                [
+                    InlineKeyboardButton("🔇 Mute", callback_data="pc_act:mute"),
+                    InlineKeyboardButton("🔒 Lock PC", callback_data="pc_act:lock"),
+                ],
+            ]
+        )
+        await update.message.reply_text(status_text, reply_markup=markup)
+
+    async def cmd_lock(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_owner(update):
+            if update.message:
+                await update.message.reply_text("Only the bot owner can lock the PC.")
+            return
+        from tools.pc_control import pc_lock
+
+        ctx = self._make_ctx(context, update.effective_chat.id, update.effective_user.id)
+        res = await pc_lock(ctx)
+        if update.message:
+            await update.message.reply_text(res)
 
     async def cmd_memory(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update):
@@ -305,6 +423,100 @@ class TelegramService:
             if update.message:
                 await update.message.reply_text(f"Couldn't place the call: {exc}")
 
+    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if not query:
+            return
+        if not self._is_authorized(update):
+            await query.answer("Unauthorized.", show_alert=True)
+            return
+
+        data = query.data or ""
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        ctx = self._make_ctx(context, chat_id, user_id)
+
+        try:
+            if data.startswith("task_done:"):
+                task_id = int(data.split(":", 1)[1])
+                if db.complete_task(task_id, user_id=user_id):
+                    await query.answer(f"Task #{task_id} completed!")
+                    await query.message.reply_text(f"✅ Task #{task_id} marked complete.")
+                else:
+                    await query.answer("Task already completed or not found.")
+                return
+
+            if data.startswith("rem_cancel:"):
+                rem_id = int(data.split(":", 1)[1])
+                if db.cancel_reminder(rem_id, user_id=user_id):
+                    await query.answer(f"Reminder #{rem_id} cancelled!")
+                    await query.message.reply_text(f"❌ Reminder #{rem_id} cancelled.")
+                else:
+                    await query.answer("Reminder already inactive.")
+                return
+
+            if data.startswith("rem_done:"):
+                rem_id = int(data.split(":", 1)[1])
+                db.cancel_reminder(rem_id, user_id=user_id)
+                await query.answer("Marked done!")
+                await query.edit_message_reply_markup(reply_markup=None)
+                return
+
+            if data.startswith("rem_snooze:"):
+                parts = data.split(":")
+                rem_id = int(parts[1])
+                mins = int(parts[2]) if len(parts) > 2 else 10
+                new_due = db.snooze_reminder(rem_id, minutes=mins, user_id=user_id)
+                if new_due:
+                    await query.answer(f"Snoozed for {mins} minutes!")
+                    await query.edit_message_reply_markup(reply_markup=None)
+                    await query.message.reply_text(
+                        f"💤 Snoozed reminder #{rem_id} for {mins} minutes."
+                    )
+                else:
+                    await query.answer("Could not snooze reminder.")
+                return
+
+            if data.startswith("act_ok:"):
+                token = data.split(":", 1)[1]
+                from tools.integrations import confirm_action
+
+                await query.answer("Executing confirmed action...")
+                await query.edit_message_reply_markup(reply_markup=None)
+                res = await confirm_action(ctx, token=token)
+                await self.send_long(context.bot, chat_id, f"✅ Confirmed:\n{res}")
+                return
+
+            if data.startswith("act_no:"):
+                db.clear_pending_actions(chat_id)
+                await query.answer("Action cancelled.")
+                await query.edit_message_reply_markup(reply_markup=None)
+                await query.message.reply_text("❌ Pending action cancelled.")
+                return
+
+            if data.startswith("pc_act:"):
+                if not self._is_owner(update):
+                    await query.answer("Owner only.", show_alert=True)
+                    return
+                act = data.split(":", 1)[1]
+                from tools.pc_control import pc_lock, pc_media_control, pc_screenshot
+
+                await query.answer(f"Running {act}...")
+                if act == "screenshot":
+                    await pc_screenshot(ctx)
+                elif act == "lock":
+                    res = await pc_lock(ctx)
+                    await query.message.reply_text(res)
+                elif act in ("play_pause", "mute"):
+                    res = await pc_media_control(ctx, action=act)
+                    await query.message.reply_text(res)
+                return
+
+            await query.answer()
+        except Exception:
+            log.exception("Callback handler failed: data=%s", data)
+            await query.answer("Action failed.", show_alert=True)
+
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update) or not update.message:
             return
@@ -351,6 +563,84 @@ class TelegramService:
             await update.message.reply_text(
                 "Something went wrong while processing your message. Please try again."
             )
+
+    async def handle_media(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Process incoming photos, screenshots, receipts, PDFs, and text documents."""
+        if not self._is_authorized(update) or not update.message:
+            return
+        if not self.respond_fn:
+            await update.message.reply_text("Jarvis brain is still initializing.")
+            return
+
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        caption = (update.message.caption or "").strip()
+
+        stop_typing = asyncio.Event()
+        typing_task = asyncio.create_task(
+            self.keep_typing(context.bot, chat_id, stop_typing)
+        )
+        try:
+            media_bytes: bytes | None = None
+            mime_type: str | None = None
+            prompt = caption
+
+            if update.message.photo:
+                photo = update.message.photo[-1]
+                tg_file = await photo.get_file()
+                media_bytes = bytes(await tg_file.download_as_bytearray())
+                mime_type = "image/jpeg"
+                if not prompt:
+                    prompt = (
+                        "Analyze this image thoroughly. If it's a receipt or bill, summarize the items "
+                        "and total. If it contains text, notes, or a problem, extract and explain it."
+                    )
+            elif update.message.document:
+                doc = update.message.document
+                if doc.file_size and doc.file_size > 15 * 1024 * 1024:
+                    await update.message.reply_text("That file is too large (max 15 MB).")
+                    return
+                tg_file = await doc.get_file()
+                raw_bytes = bytes(await tg_file.download_as_bytearray())
+                fname = (doc.file_name or "").lower()
+                doc_mime = (doc.mime_type or "application/octet-stream").lower()
+
+                if doc_mime.startswith("text/") or fname.endswith(
+                    (".txt", ".md", ".py", ".json", ".csv", ".log", ".yaml", ".yml")
+                ):
+                    decoded = raw_bytes.decode("utf-8", errors="replace")[:12000]
+                    user_instruction = caption or "Summarize and analyze this document."
+                    prompt = f"{user_instruction}\n\nDocument ({doc.file_name}):\n{decoded}"
+                elif doc_mime.startswith("image/") or doc_mime == "application/pdf":
+                    media_bytes = raw_bytes
+                    mime_type = doc_mime
+                    if not prompt:
+                        prompt = f"Analyze and summarize this attached file ({doc.file_name})."
+                else:
+                    await update.message.reply_text(
+                        f"Unsupported file type ({doc_mime}). Send photos, PDFs, or text/code files."
+                    )
+                    return
+            else:
+                return
+
+            ctx = self._make_ctx(context, chat_id, user_id)
+            sig = inspect.signature(self.respond_fn)
+            if "media_bytes" in sig.parameters:
+                reply = await self.respond_fn(
+                    ctx, prompt, media_bytes=media_bytes, mime_type=mime_type
+                )
+            else:
+                reply = await self.respond_fn(ctx, prompt)
+            await self.send_long(context.bot, chat_id, reply)
+        except Exception:
+            log.exception("Media handler failed")
+            await update.message.reply_text(
+                "Couldn't process that file or image right now. Please try again."
+            )
+        finally:
+            stop_typing.set()
+            typing_task.cancel()
 
     async def handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update) or not update.message:
@@ -411,8 +701,12 @@ class TelegramService:
             BotCommand("start", "Greeting and quick overview"),
             BotCommand("help", "Show available commands"),
             BotCommand("briefing", "Morning debrief now"),
-            BotCommand("tasks", "List open tasks"),
-            BotCommand("reminders", "List upcoming reminders"),
+            BotCommand("tasks", "List & complete open tasks"),
+            BotCommand("reminders", "List & cancel reminders"),
+            BotCommand("expenses", "30-day expense report"),
+            BotCommand("habits", "7-day habit & expense stats"),
+            BotCommand("pc", "PC status & remote control"),
+            BotCommand("lock", "Lock Windows PC screen"),
             BotCommand("memory", "List saved memories & preferences"),
             BotCommand("status", "Show Jarvis status"),
             BotCommand("model", "Show active Gemini models"),
@@ -422,7 +716,7 @@ class TelegramService:
         ]
 
     def register_handlers(self, app: Application) -> None:
-        """Attach all command and message handlers with block=False for responsiveness."""
+        """Attach all command, callback, and message handlers with block=False for responsiveness."""
         app.add_handler(CommandHandler("start", self.cmd_start, block=False))
         app.add_handler(CommandHandler("help", self.cmd_help, block=False))
         app.add_handler(CommandHandler("myid", self.cmd_myid, block=False))
@@ -433,9 +727,17 @@ class TelegramService:
         app.add_handler(CommandHandler("model", self.cmd_model, block=False))
         app.add_handler(CommandHandler("tasks", self.cmd_tasks, block=False))
         app.add_handler(CommandHandler("reminders", self.cmd_reminders, block=False))
+        app.add_handler(CommandHandler("expenses", self.cmd_expenses, block=False))
+        app.add_handler(CommandHandler(["habits", "stats"], self.cmd_habits, block=False))
+        app.add_handler(CommandHandler(["pc", "pcstatus"], self.cmd_pc, block=False))
+        app.add_handler(CommandHandler("lock", self.cmd_lock, block=False))
         app.add_handler(CommandHandler(["memory", "memories"], self.cmd_memory, block=False))
+        app.add_handler(CallbackQueryHandler(self.handle_callback, block=False))
         app.add_handler(
             MessageHandler(filters.VOICE | filters.AUDIO, self.handle_voice, block=False)
+        )
+        app.add_handler(
+            MessageHandler(filters.PHOTO | filters.Document.ALL, self.handle_media, block=False)
         )
         app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text, block=False)
