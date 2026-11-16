@@ -133,6 +133,78 @@ class HabitItem:
 
 
 @dataclass(slots=True)
+class KnowledgeNote:
+    id: int
+    user_id: int
+    title: str
+    content: str
+    source_url: str
+    tags: str
+    created_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "title": self.title,
+            "content": self.content,
+            "source_url": self.source_url,
+            "tags": self.tags,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(slots=True)
+class PriceWatchItem:
+    id: int
+    user_id: int
+    chat_id: int
+    url: str
+    product_name: str
+    target_price: float
+    currency: str
+    last_price: float | None
+    active: bool
+    created_at: str
+    last_checked_at: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "chat_id": self.chat_id,
+            "url": self.url,
+            "product_name": self.product_name,
+            "target_price": self.target_price,
+            "currency": self.currency,
+            "last_price": self.last_price,
+            "active": self.active,
+            "created_at": self.created_at,
+            "last_checked_at": self.last_checked_at,
+        }
+
+
+@dataclass(slots=True)
+class BudgetItem:
+    id: int
+    user_id: int
+    category: str
+    monthly_limit: float
+    currency: str
+    created_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "category": self.category,
+            "monthly_limit": self.monthly_limit,
+            "currency": self.currency,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(slots=True)
 class SystemStatus:
     memories: int
     open_tasks: int

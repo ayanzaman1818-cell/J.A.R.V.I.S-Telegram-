@@ -13,10 +13,13 @@ from typing import Any, Iterator
 
 import config
 from database.models import (
+    BudgetItem,
     ExpenseItem,
     HabitItem,
+    KnowledgeNote,
     MemoryItem,
     PendingAction,
+    PriceWatchItem,
     ReminderItem,
     SystemStatus,
     TaskItem,
@@ -159,6 +162,47 @@ class DatabaseRepository:
 
                 CREATE INDEX IF NOT EXISTS idx_habits_user_created
                     ON habits(user_id, created_at);
+
+                CREATE TABLE IF NOT EXISTS budgets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL DEFAULT {default_owner},
+                    category TEXT NOT NULL,
+                    monthly_limit REAL NOT NULL,
+                    currency TEXT NOT NULL DEFAULT 'BDT',
+                    created_at TEXT NOT NULL,
+                    UNIQUE(user_id, category, currency)
+                );
+
+                CREATE TABLE IF NOT EXISTS knowledge_notes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL DEFAULT {default_owner},
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    source_url TEXT NOT NULL DEFAULT '',
+                    tags TEXT NOT NULL DEFAULT '',
+                    embedding TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_knowledge_user_created
+                    ON knowledge_notes(user_id, created_at);
+
+                CREATE TABLE IF NOT EXISTS price_watches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL DEFAULT {default_owner},
+                    chat_id INTEGER NOT NULL,
+                    url TEXT NOT NULL,
+                    product_name TEXT NOT NULL,
+                    target_price REAL NOT NULL,
+                    currency TEXT NOT NULL DEFAULT 'USD',
+                    last_price REAL,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    last_checked_at TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_price_watches_active
+                    ON price_watches(active, user_id);
                 """
             )
 
@@ -746,6 +790,305 @@ class DatabaseRepository:
                 (uid, cutoff),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def daily_expense_series(
+        self, days: int = 14, user_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Return daily expense totals for the past N days (chronological)."""
+        uid = self._resolve_user_id(user_id)
+        n_days = max(1, min(int(days), 90))
+        now_dt = self.now()
+        cutoff = (now_dt - timedelta(days=n_days - 1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT SUBSTR(created_at, 1, 10) AS day, currency, ROUND(SUM(amount), 2) AS total
+                   FROM expenses
+                   WHERE user_id = ? AND created_at >= ?
+                   GROUP BY day, currency
+                   ORDER BY day ASC""",
+                (uid, cutoff.isoformat()),
+            ).fetchall()
+        by_day: dict[str, float] = {}
+        for r in rows:
+            by_day[r["day"]] = by_day.get(r["day"], 0.0) + float(r["total"])
+
+        result: list[dict[str, Any]] = []
+        for i in range(n_days):
+            d_str = (cutoff + timedelta(days=i)).strftime("%Y-%m-%d")
+            result.append({"date": d_str, "total": round(by_day.get(d_str, 0.0), 2)})
+        return result
+
+    def daily_habit_matrix(
+        self, days: int = 14, user_id: int | None = None
+    ) -> dict[str, Any]:
+        """Return per-habit daily completion counts and current streaks for the past N days."""
+        uid = self._resolve_user_id(user_id)
+        n_days = max(1, min(int(days), 60))
+        now_dt = self.now()
+        cutoff = (now_dt - timedelta(days=n_days - 1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        date_labels = [
+            (cutoff + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(n_days)
+        ]
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT habit, unit, SUBSTR(created_at, 1, 10) AS day, ROUND(SUM(value), 2) AS val
+                   FROM habits
+                   WHERE user_id = ? AND created_at >= ?
+                   GROUP BY habit, unit, day
+                   ORDER BY habit ASC, day ASC""",
+                (uid, cutoff.isoformat()),
+            ).fetchall()
+
+        habits_map: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            h_name = r["habit"]
+            info = habits_map.setdefault(
+                h_name,
+                {"habit": h_name, "unit": r["unit"], "days": {}, "total": 0.0},
+            )
+            info["days"][r["day"]] = float(r["val"])
+            info["total"] = round(info["total"] + float(r["val"]), 2)
+
+        for info in habits_map.values():
+            streak = 0
+            for d_str in reversed(date_labels):
+                if info["days"].get(d_str, 0.0) > 0:
+                    streak += 1
+                elif d_str == date_labels[-1]:
+                    # Allow today not yet logged if yesterday was logged
+                    continue
+                else:
+                    break
+            info["streak"] = streak
+
+        return {
+            "dates": date_labels,
+            "habits": list(habits_map.values()),
+        }
+
+    def set_budget(
+        self,
+        category: str,
+        monthly_limit: float,
+        currency: str = "BDT",
+        user_id: int | None = None,
+    ) -> int:
+        uid = self._resolve_user_id(user_id)
+        norm_cat = (category or "general").strip().lower() or "general"
+        norm_curr = (currency or "BDT").strip().upper() or "BDT"
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO budgets(user_id, category, monthly_limit, currency, created_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(user_id, category, currency)
+                   DO UPDATE SET monthly_limit = excluded.monthly_limit""",
+                (uid, norm_cat, float(monthly_limit), norm_curr, self.now().isoformat()),
+            )
+            row = conn.execute(
+                "SELECT id FROM budgets WHERE user_id = ? AND category = ? AND currency = ?",
+                (uid, norm_cat, norm_curr),
+            ).fetchone()
+            bid = int(row["id"]) if row else 0
+        self.audit("budget_set", f"{norm_cat}: {monthly_limit} {norm_curr}", user_id=uid)
+        return bid
+
+    def list_budgets(self, user_id: int | None = None) -> list[dict[str, Any]]:
+        uid = self._resolve_user_id(user_id)
+        month_start = self.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM budgets WHERE user_id = ? ORDER BY category ASC",
+                (uid,),
+            ).fetchall()
+            results: list[dict[str, Any]] = []
+            for r in rows:
+                spent_row = conn.execute(
+                    """SELECT COALESCE(SUM(amount), 0.0) AS spent
+                       FROM expenses
+                       WHERE user_id = ? AND category = ? AND currency = ? AND created_at >= ?""",
+                    (uid, r["category"], r["currency"], month_start),
+                ).fetchone()
+                spent = round(float(spent_row["spent"] if spent_row else 0.0), 2)
+                limit_val = float(r["monthly_limit"])
+                pct = round((spent / limit_val) * 100, 1) if limit_val > 0 else 0.0
+                results.append(
+                    {
+                        "id": r["id"],
+                        "category": r["category"],
+                        "monthly_limit": limit_val,
+                        "currency": r["currency"],
+                        "spent": spent,
+                        "percent": pct,
+                    }
+                )
+        return results
+
+    def check_budget_alert(
+        self, category: str, currency: str = "BDT", user_id: int | None = None
+    ) -> str | None:
+        """Return a warning message if the user's monthly category budget is >= 80% used."""
+        norm_cat = (category or "general").strip().lower()
+        norm_curr = (currency or "BDT").strip().upper()
+        for b in self.list_budgets(user_id=user_id):
+            if b["category"] == norm_cat and b["currency"] == norm_curr:
+                if b["percent"] >= 100.0:
+                    return (
+                        f"⚠️ Budget exceeded for [{norm_cat}]: "
+                        f"{b['spent']:.2f} / {b['monthly_limit']:.2f} {norm_curr} ({b['percent']:.0f}%)."
+                    )
+                if b["percent"] >= 80.0:
+                    return (
+                        f"⚠️ Budget alert for [{norm_cat}]: "
+                        f"{b['spent']:.2f} / {b['monthly_limit']:.2f} {norm_curr} ({b['percent']:.0f}%)."
+                    )
+        return None
+
+    def add_knowledge_note(
+        self,
+        title: str,
+        content: str,
+        source_url: str = "",
+        tags: str = "",
+        embedding: list[float] | None = None,
+        user_id: int | None = None,
+    ) -> int:
+        uid = self._resolve_user_id(user_id)
+        emb_json = json.dumps(embedding) if embedding else ""
+        with self._connect() as conn:
+            cur = conn.execute(
+                """INSERT INTO knowledge_notes(user_id, title, content, source_url, tags, embedding, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    uid,
+                    title.strip()[:300] or "Untitled Note",
+                    content.strip(),
+                    source_url.strip(),
+                    tags.strip().lower(),
+                    emb_json,
+                    self.now().isoformat(),
+                ),
+            )
+            note_id = int(cur.lastrowid)
+        self.audit("knowledge_saved", f"#{note_id} {title.strip()[:80]}", user_id=uid)
+        return note_id
+
+    def list_knowledge_notes(
+        self, limit: int = 30, tag: str = "", user_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        uid = self._resolve_user_id(user_id)
+        with self._connect() as conn:
+            if tag.strip():
+                rows = conn.execute(
+                    """SELECT id, user_id, title, content, source_url, tags, embedding, created_at
+                       FROM knowledge_notes
+                       WHERE user_id = ? AND tags LIKE ?
+                       ORDER BY id DESC LIMIT ?""",
+                    (uid, f"%{tag.strip().lower()}%", int(limit)),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT id, user_id, title, content, source_url, tags, embedding, created_at
+                       FROM knowledge_notes
+                       WHERE user_id = ?
+                       ORDER BY id DESC LIMIT ?""",
+                    (uid, int(limit)),
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_knowledge_note(self, note_id: int, user_id: int | None = None) -> bool:
+        uid = self._resolve_user_id(user_id)
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM knowledge_notes WHERE id = ? AND user_id = ?",
+                (int(note_id), uid),
+            )
+        if cur.rowcount:
+            self.audit("knowledge_deleted", f"#{note_id}", user_id=uid)
+            return True
+        return False
+
+    def add_price_watch(
+        self,
+        chat_id: int,
+        url: str,
+        product_name: str,
+        target_price: float,
+        currency: str = "USD",
+        last_price: float | None = None,
+        user_id: int | None = None,
+    ) -> int:
+        uid = self._resolve_user_id(user_id or chat_id)
+        now_iso = self.now().isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """INSERT INTO price_watches(
+                       user_id, chat_id, url, product_name, target_price, currency,
+                       last_price, active, created_at, last_checked_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+                (
+                    uid,
+                    chat_id,
+                    url.strip(),
+                    product_name.strip()[:200] or "Tracked Item",
+                    float(target_price),
+                    (currency or "USD").strip().upper(),
+                    float(last_price) if last_price is not None else None,
+                    now_iso,
+                    now_iso if last_price is not None else None,
+                ),
+            )
+            watch_id = int(cur.lastrowid)
+        self.audit("price_watch_added", f"#{watch_id} {product_name}", user_id=uid)
+        return watch_id
+
+    def list_price_watches(
+        self, active_only: bool = True, user_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            if user_id is not None:
+                uid = self._resolve_user_id(user_id)
+                sql = "SELECT * FROM price_watches WHERE user_id = ?"
+                params: tuple[Any, ...] = (uid,)
+                if active_only:
+                    sql += " AND active = 1"
+                sql += " ORDER BY id DESC"
+                rows = conn.execute(sql, params).fetchall()
+            else:
+                sql = "SELECT * FROM price_watches"
+                if active_only:
+                    sql += " WHERE active = 1"
+                sql += " ORDER BY id ASC"
+                rows = conn.execute(sql).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_price_watch(
+        self, watch_id: int, last_price: float | None, active: bool = True
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE price_watches
+                   SET last_price = ?, active = ?, last_checked_at = ?
+                   WHERE id = ?""",
+                (
+                    float(last_price) if last_price is not None else None,
+                    1 if active else 0,
+                    self.now().isoformat(),
+                    int(watch_id),
+                ),
+            )
+
+    def cancel_price_watch(self, watch_id: int, user_id: int | None = None) -> bool:
+        uid = self._resolve_user_id(user_id)
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE price_watches SET active = 0 WHERE id = ? AND user_id = ? AND active = 1",
+                (int(watch_id), uid),
+            )
+        return bool(cur.rowcount)
 
     def create_pending_action(
         self,
