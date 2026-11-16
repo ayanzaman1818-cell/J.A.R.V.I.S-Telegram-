@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from datetime import datetime, time as dtime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -16,6 +17,7 @@ load_dotenv(BASE_DIR / ".env", override=True)
 
 
 def env(name: str, default: str = "") -> str:
+    """Read and strip an environment variable."""
     """Read and strip an environment variable."""
     return os.getenv(name, default).strip()
 
@@ -78,22 +80,40 @@ USER_NAME: str = env("USER_NAME", "sir")
 LOCATION: str = env("LOCATION", "Dhaka")
 TIMEZONE: str = env("TIMEZONE", "Asia/Dhaka")
 BRIEFING_TIME: str = env("BRIEFING_TIME", "06:40")
+EVENING_BRIEFING_TIME: str = env("EVENING_BRIEFING_TIME", "21:30")
 BRIEFING_VOICE: bool = flag("BRIEFING_VOICE", "true")
 BRIEFING_CALL: bool = flag("BRIEFING_CALL", "false")
+PROACTIVE_ALERTS: bool = flag("PROACTIVE_ALERTS", "true")
+BATTERY_ALERT_THRESHOLD: int = max(5, min(env_int("BATTERY_ALERT_THRESHOLD", 20), 95))
 QUIET_HOURS_START: str = env("QUIET_HOURS_START", "22:00")
 QUIET_HOURS_END: str = env("QUIET_HOURS_END", "07:00")
 
 # --- Voice & Calls ---
 GROQ_API_KEY: str = env("GROQ_API_KEY")
 TTS_VOICE: str = env("TTS_VOICE", "en-GB-RyanNeural")
+TTS_RATE: str = env("TTS_RATE", "+5%")
+TTS_PITCH: str = env("TTS_PITCH", "-4Hz")
+VOICE_CHAT_DEFAULT: bool = flag("VOICE_CHAT_DEFAULT", "false")
+
+# Optional ElevenLabs TTS (for cloned Marvel JARVIS / Paul Bettany voice)
+ELEVENLABS_API_KEY: str = env("ELEVENLABS_API_KEY")
+# Default ElevenLabs British butler voice ID ("Daniel" / "George" or custom Paul Bettany clone ID)
+ELEVENLABS_VOICE_ID: str = env("ELEVENLABS_VOICE_ID", "onwK4e9ZLuTAKqWW03F9")
+ELEVENLABS_MODEL: str = env("ELEVENLABS_MODEL", "eleven_multilingual_v2")
+
+# Optional Fish Audio TTS (fish.audio cloned JARVIS model)
+FISH_API_KEY: str = env("FISH_API_KEY")
+FISH_MODEL_ID: str = env("FISH_MODEL_ID") or env("FISH_VOICE_ID")
+FISH_MODEL: str = env("FISH_MODEL", "s2.1-pro-free")
 
 TWILIO_SID: str = env("TWILIO_ACCOUNT_SID")
 TWILIO_TOKEN: str = env("TWILIO_AUTH_TOKEN")
 TWILIO_NUMBER: str = env("TWILIO_NUMBER")
 MY_PHONE: str = env("MY_PHONE")
 TWILIO_VOICE: str = env("TWILIO_VOICE", "alice")
+TWILIO_WEBHOOK_URL: str = env("TWILIO_WEBHOOK_URL")
 
-# --- Composio Integrations ---
+# --- Composio Integrations & Knowledge ---
 COMPOSIO_API_KEY: str = env("COMPOSIO_API_KEY")
 COMPOSIO_USER_ID: str = env("COMPOSIO_USER_ID")
 COMPOSIO_GMAIL_ACCOUNT: str = env("COMPOSIO_GMAIL_ACCOUNT")
@@ -101,6 +121,14 @@ COMPOSIO_GOOGLEDRIVE_ACCOUNT: str = env("COMPOSIO_GOOGLEDRIVE_ACCOUNT")
 COMPOSIO_GOOGLECALENDAR_ACCOUNT: str = env("COMPOSIO_GOOGLECALENDAR_ACCOUNT")
 KNOWLEDGE_DRIVE_FOLDER: str = env("KNOWLEDGE_DRIVE_FOLDER")
 COMPOSIO_TIMEOUT_SECONDS: int = max(5, env_int("COMPOSIO_TIMEOUT_SECONDS", 25))
+
+KNOWLEDGE_LOCAL_DIR: Path = Path(env("KNOWLEDGE_LOCAL_DIR", str(BASE_DIR / "notes")))
+if not KNOWLEDGE_LOCAL_DIR.is_absolute():
+    KNOWLEDGE_LOCAL_DIR = BASE_DIR / KNOWLEDGE_LOCAL_DIR
+
+INBOX_DIR: Path = Path(env("INBOX_DIR", str(BASE_DIR / "inbox")))
+if not INBOX_DIR.is_absolute():
+    INBOX_DIR = BASE_DIR / INBOX_DIR
 
 # --- Database & Logging ---
 DB_PATH: Path = Path(env("DB_PATH", str(BASE_DIR / "jarvis.db")))
@@ -136,6 +164,22 @@ def is_owner_user(user_id: int | None) -> bool:
     return bool(user_id and OWNER_ID and user_id == OWNER_ID)
 
 
+def is_quiet_hours(now_dt: datetime | None = None) -> bool:
+    """Return True if current local time falls within QUIET_HOURS_START .. QUIET_HOURS_END."""
+    try:
+        sh, sm = (int(x) for x in QUIET_HOURS_START.split(":"))
+        eh, em = (int(x) for x in QUIET_HOURS_END.split(":"))
+        start_t = dtime(sh, sm)
+        end_t = dtime(eh, em)
+    except Exception:
+        return False
+
+    current = (now_dt or datetime.now(get_zoneinfo())).time()
+    if start_t <= end_t:
+        return start_t <= current < end_t
+    return current >= start_t or current < end_t
+
+
 def redact_secrets(text: str) -> str:
     """Scrub API keys, Telegram bot tokens, and Twilio credentials from log strings."""
     if not text:
@@ -147,6 +191,8 @@ def redact_secrets(text: str) -> str:
         GROQ_API_KEY,
         TWILIO_TOKEN,
         COMPOSIO_API_KEY,
+        ELEVENLABS_API_KEY,
+        FISH_API_KEY,
     ):
         if secret and len(secret) > 6:
             cleaned = cleaned.replace(secret, "[REDACTED]")

@@ -165,14 +165,19 @@ class TelegramService:
         if not update.message:
             return
         await update.message.reply_text(
-            f"At your service, {config.USER_NAME}. Ask me anything, send a photo/document/YouTube link, or use:\n"
+            f"At your service, {config.USER_NAME}. Ask me anything, send a voice note/photo/document/YouTube link, or use:\n"
             "/help - show all available commands\n"
+            "/voicemode - toggle two-way Marvel JARVIS voice chat mode\n"
             "/briefing - morning debrief right now\n"
+            "/evening - evening reflection & wrap-up\n"
             "/tasks - view & complete open tasks\n"
             "/reminders - view & manage reminders\n"
-            "/expenses - view 30-day expense report\n"
-            "/habits - view 7-day habit streaks\n"
+            "/expenses - view 30-day expense report & visual chart\n"
+            "/habits - view habit streaks & visual heatmap\n"
+            "/notes - search or view Second Brain knowledge vault\n"
+            "/watch - view active price-drop watches\n"
             "/pc - check PC status & quick remote controls\n"
+            "/clip - read or copy text to PC clipboard\n"
             "/memory - view saved memories & preferences\n"
             "/status - check system health & model settings\n"
             "/reset - clear short-term conversation context"
@@ -188,19 +193,25 @@ class TelegramService:
             "JARVIS Commands:\n"
             "/start - greeting and quick overview\n"
             "/help - list available commands and capabilities\n"
-            "/reset (or /clear) - clear current conversation context while keeping long-term memory\n"
-            "/status - display system health, models, and database counts\n"
-            "/model - inspect active Gemini models and circuit-breaker status\n"
-            "/memory (or /memories) - list remembered facts and user preferences\n"
+            "/voicemode (or /voice) - toggle two-way Telegram voice chat & Marvel JARVIS voice settings\n"
+            "/briefing - generate and deliver your morning briefing now\n"
+            "/evening - generate and deliver your evening reflection now\n"
             "/tasks - list open personal tasks with quick-complete buttons\n"
             "/reminders - list active scheduled reminders with cancel buttons\n"
-            "/expenses - view 30-day expense breakdown\n"
-            "/habits (or /stats) - view habit logs and expense summary\n"
-            "/pc (or /pcstatus) - PC hardware status and remote control buttons\n"
+            "/expenses - view 30-day expense breakdown and chart button\n"
+            "/habits (or /stats) - view habit streaks and heatmap chart button\n"
+            "/notes [query] (or /brain) - list or search your Second Brain knowledge vault\n"
+            "/watch - list active product price-drop watches\n"
+            "/pc (or /pcstatus) - PC hardware status, clipboard, focus modes & remote controls\n"
+            "/clip [text] - view PC clipboard or copy <text> to PC clipboard\n"
             "/lock - lock your Windows PC immediately (owner only)\n"
-            "/briefing - generate and deliver your daily briefing now\n"
+            "/memory (or /memories) - list remembered facts and user preferences\n"
+            "/status - display system health, voice engine, models, and database counts\n"
+            "/model - inspect active Gemini models and circuit-breaker status\n"
+            "/reset (or /clear) - clear current conversation context while keeping long-term memory\n"
             "/call <message> - ring your phone with a spoken message (owner only)\n"
-            "/myid - display your numeric Telegram user ID"
+            "/myid - display your numeric Telegram user ID\n\n"
+            "Tip: Send any file or photo with caption '/save' to save it directly to your PC Inbox folder."
         )
 
     async def cmd_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -231,6 +242,16 @@ class TelegramService:
             voice_state = "configured (Gemini multimodal STT)"
         else:
             voice_state = "not configured"
+
+        try:
+            from services import voice as voice_svc
+
+            tts_state = voice_svc.tts_engine_status(user_id=user_id)
+            v_mode = "ON (two-way spoken replies)" if voice_svc.is_voice_mode_enabled(user_id) else "OFF"
+        except Exception:
+            tts_state = config.TTS_VOICE
+            v_mode = "OFF"
+
         if update.message:
             await update.message.reply_text(
                 "Jarvis status: online\n"
@@ -241,6 +262,8 @@ class TelegramService:
                 f"- Open tasks: {state['open_tasks']}\n"
                 f"- Active reminders: {state['active_reminders']}\n"
                 f"- Voice STT: {voice_state}\n"
+                f"- Voice TTS: {tts_state}\n"
+                f"- Two-Way Voice Mode: {v_mode}\n"
                 f"- Composio: {composio_state}"
             )
 
@@ -326,7 +349,10 @@ class TelegramService:
 
         ctx = self._make_ctx(context, update.effective_chat.id, update.effective_user.id)
         text = await expense_report(ctx, days=30)
-        await update.message.reply_text(text)
+        markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("📊 Generate Expense Chart", callback_data="chart:expense")]]
+        )
+        await update.message.reply_text(text, reply_markup=markup)
 
     async def cmd_habits(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update) or not update.message:
@@ -336,7 +362,15 @@ class TelegramService:
         ctx = self._make_ctx(context, update.effective_chat.id, update.effective_user.id)
         h_text = await habit_report(ctx, days=7)
         e_text = await expense_report(ctx, days=7)
-        await update.message.reply_text(f"{h_text}\n\n{e_text}")
+        markup = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("🔥 Habit Streak Chart", callback_data="chart:habit"),
+                    InlineKeyboardButton("📊 Expense Chart", callback_data="chart:expense"),
+                ]
+            ]
+        )
+        await update.message.reply_text(f"{h_text}\n\n{e_text}", reply_markup=markup)
 
     async def cmd_pc(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_owner(update):
@@ -358,6 +392,13 @@ class TelegramService:
                 [
                     InlineKeyboardButton("🔇 Mute", callback_data="pc_act:mute"),
                     InlineKeyboardButton("🔒 Lock PC", callback_data="pc_act:lock"),
+                ],
+                [
+                    InlineKeyboardButton("📋 Read Clipboard", callback_data="pc_act:clipboard"),
+                    InlineKeyboardButton("💼 Work Mode", callback_data="pc_act:work"),
+                ],
+                [
+                    InlineKeyboardButton("🌙 Night Mode", callback_data="pc_act:night"),
                 ],
             ]
         )
@@ -404,6 +445,96 @@ class TelegramService:
             return
         await context.bot.send_chat_action(chat_id, "typing")
         await self.briefing_fn(context.bot, chat_id, context.job_queue)
+
+    async def cmd_evening(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_authorized(update):
+            return
+        chat_id = update.effective_chat.id
+        from services.briefing import send_evening_briefing
+
+        await context.bot.send_chat_action(chat_id, "typing")
+        await send_evening_briefing(context.bot, chat_id, context.job_queue)
+
+    async def cmd_voicemode(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_authorized(update) or not update.message:
+            return
+        user_id = update.effective_user.id
+        from services import voice as voice_svc
+
+        args = [a.lower() for a in (context.args or [])]
+        if args:
+            if args[0] in ("on", "true", "1", "enable"):
+                voice_svc.set_voice_mode(True, user_id=user_id)
+            elif args[0] in ("off", "false", "0", "disable"):
+                voice_svc.set_voice_mode(False, user_id=user_id)
+            elif args[0] in voice_svc.VOICE_PRESETS:
+                voice_svc.set_user_tts_voice(args[0], user_id=user_id)
+                voice_svc.set_voice_mode(True, user_id=user_id)
+
+        active = voice_svc.is_voice_mode_enabled(user_id=user_id)
+        engine = voice_svc.tts_engine_status(user_id=user_id)
+        state_str = "ON (two-way spoken replies active)" if active else "OFF (voice replies only when you send audio)"
+        markup = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("🎙 Enable 2-Way Voice", callback_data="voice_mode:on"),
+                    InlineKeyboardButton("🔇 Disable 2-Way Voice", callback_data="voice_mode:off"),
+                ],
+                [
+                    InlineKeyboardButton("🎩 Marvel JARVIS Voice", callback_data="voice_set:jarvis"),
+                    InlineKeyboardButton("🇬🇧 Sonia (UK)", callback_data="voice_set:sonia"),
+                ],
+                [
+                    InlineKeyboardButton("🇺🇸 Christopher (US)", callback_data="voice_set:christopher"),
+                    InlineKeyboardButton("🔊 Test TTS Voice", callback_data="voice_test:jarvis"),
+                ],
+                [
+                    InlineKeyboardButton("🎬 MCU Greeting", callback_data="jarvis_clip:session.start"),
+                    InlineKeyboardButton("🎬 MCU Complete", callback_data="jarvis_clip:task.complete"),
+                    InlineKeyboardButton("🎬 MCU Dry Wit", callback_data="jarvis_clip:task.error"),
+                ],
+            ]
+        )
+        await update.message.reply_text(
+            f"🎙 Two-Way Voice Chat Mode: {state_str}\n"
+            f"Voice Engine: {engine}\n\n"
+            "Send any voice note to talk with me, or enable 2-Way Voice so I speak every response aloud.",
+            reply_markup=markup,
+        )
+
+    async def cmd_clip(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_owner(update) or not update.message:
+            if update.message:
+                await update.message.reply_text("Only the bot owner can access the PC clipboard.")
+            return
+        from tools.pc_control import pc_clipboard_get, pc_clipboard_set
+
+        ctx = self._make_ctx(context, update.effective_chat.id, update.effective_user.id)
+        text_arg = " ".join(context.args or []).strip()
+        if text_arg:
+            res = await pc_clipboard_set(ctx, text=text_arg)
+        else:
+            res = await pc_clipboard_get(ctx)
+        await update.message.reply_text(res)
+
+    async def cmd_notes(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_authorized(update) or not update.message:
+            return
+        from tools.knowledge import list_notes, search_knowledge
+
+        ctx = self._make_ctx(context, update.effective_chat.id, update.effective_user.id)
+        query = " ".join(context.args or []).strip()
+        res = await (search_knowledge(ctx, query=query) if query else list_notes(ctx))
+        await self.send_long(context.bot, update.effective_chat.id, res)
+
+    async def cmd_watch(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._is_authorized(update) or not update.message:
+            return
+        from tools.watchdog import list_price_watches
+
+        ctx = self._make_ctx(context, update.effective_chat.id, update.effective_user.id)
+        res = await list_price_watches(ctx)
+        await self.send_long(context.bot, update.effective_chat.id, res)
 
     async def cmd_call(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_owner(update):
@@ -499,7 +630,13 @@ class TelegramService:
                     await query.answer("Owner only.", show_alert=True)
                     return
                 act = data.split(":", 1)[1]
-                from tools.pc_control import pc_lock, pc_media_control, pc_screenshot
+                from tools.pc_control import (
+                    pc_clipboard_get,
+                    pc_focus_mode,
+                    pc_lock,
+                    pc_media_control,
+                    pc_screenshot,
+                )
 
                 await query.answer(f"Running {act}...")
                 if act == "screenshot":
@@ -510,12 +647,92 @@ class TelegramService:
                 elif act in ("play_pause", "mute"):
                     res = await pc_media_control(ctx, action=act)
                     await query.message.reply_text(res)
+                elif act == "clipboard":
+                    res = await pc_clipboard_get(ctx)
+                    await query.message.reply_text(res)
+                elif act in ("work", "night", "chill", "meeting"):
+                    res = await pc_focus_mode(ctx, mode=act)
+                    await query.message.reply_text(res)
+                return
+
+            if data.startswith("chart:"):
+                kind = data.split(":", 1)[1]
+                from tools.charts import expense_chart, habit_chart
+
+                await query.answer("Generating visual chart...")
+                if kind == "expense":
+                    await expense_chart(ctx, days=30)
+                elif kind == "habit":
+                    await habit_chart(ctx, days=14)
+                return
+
+            if data.startswith("voice_mode:"):
+                mode_val = data.split(":", 1)[1] == "on"
+                from services import voice as voice_svc
+
+                voice_svc.set_voice_mode(mode_val, user_id=user_id)
+                state_txt = "ON (two-way spoken replies)" if mode_val else "OFF"
+                await query.answer(f"2-Way Voice Mode: {state_txt}")
+                await query.message.reply_text(f"🎙 Two-Way Voice Chat Mode is now {state_txt}.")
+                return
+
+            if data.startswith("voice_set:"):
+                preset = data.split(":", 1)[1]
+                from services import voice as voice_svc
+
+                chosen = voice_svc.set_user_tts_voice(preset, user_id=user_id)
+                voice_svc.set_voice_mode(True, user_id=user_id)
+                await query.answer(f"Voice set to {chosen}")
+                await query.message.reply_text(
+                    f"🎩 Voice updated to {preset.upper()} ({chosen}). Two-way voice chat is active."
+                )
+                return
+
+            if data.startswith("voice_test:"):
+                await query.answer("Synthesizing Marvel JARVIS voice sample...")
+                sample_line = (
+                    f"At your service, {config.USER_NAME}. All systems are online and operating at peak efficiency."
+                )
+                await self._send_tts_reply(context.bot, chat_id, sample_line, user_id=user_id)
+                return
+
+            if data.startswith("jarvis_clip:"):
+                cat = data.split(":", 1)[1]
+                from tools.comms import jarvis_voice_clip
+
+                await query.answer("Playing MCU JARVIS voice clip...")
+                await jarvis_voice_clip(ctx, category=cat)
                 return
 
             await query.answer()
         except Exception:
             log.exception("Callback handler failed: data=%s", data)
             await query.answer("Action failed.", show_alert=True)
+
+    async def _send_tts_reply(
+        self, bot: Any, chat_id: int, text: str, user_id: int | None = None
+    ) -> None:
+        """Synthesize and send a spoken voice note in Telegram."""
+        if not self.tts_fn:
+            return
+        try:
+            try:
+                await bot.send_chat_action(chat_id, "record_voice")
+            except Exception:
+                pass
+            sig = inspect.signature(self.tts_fn)
+            if "user_id" in sig.parameters:
+                path = await self.tts_fn(text, user_id=user_id)
+            else:
+                path = await self.tts_fn(text)
+            try:
+                with open(path, "rb") as f:
+                    await bot.send_voice(chat_id, f)
+            finally:
+                if os.path.exists(path):
+                    os.unlink(path)
+        except Exception:
+            log.exception("Voice reply TTS failed")
 
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_authorized(update) or not update.message:
@@ -555,6 +772,15 @@ class TelegramService:
                 time.perf_counter() - brain_started,
             )
             await self.send_long(context.bot, chat_id, reply)
+
+            # If Two-Way Voice Chat Mode is active, also speak the response aloud
+            try:
+                from services import voice as voice_svc
+
+                if voice_svc.is_voice_mode_enabled(user_id):
+                    await self._send_tts_reply(context.bot, chat_id, reply, user_id=user_id)
+            except Exception:
+                log.debug("Two-way voice check skipped", exc_info=True)
         except Exception:
             log.exception(
                 "Text handler failed after %.2fs",
@@ -565,7 +791,7 @@ class TelegramService:
             )
 
     async def handle_media(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Process incoming photos, screenshots, receipts, PDFs, and text documents."""
+        """Process incoming photos, screenshots, receipts, PDFs, text documents, and '/save' PC inbox transfers."""
         if not self._is_authorized(update) or not update.message:
             return
         if not self.respond_fn:
@@ -584,12 +810,14 @@ class TelegramService:
             media_bytes: bytes | None = None
             mime_type: str | None = None
             prompt = caption
+            save_filename: str | None = None
 
             if update.message.photo:
                 photo = update.message.photo[-1]
                 tg_file = await photo.get_file()
                 media_bytes = bytes(await tg_file.download_as_bytearray())
                 mime_type = "image/jpeg"
+                save_filename = f"photo_{update.message.message_id}.jpg"
                 if not prompt:
                     prompt = (
                         "Analyze this image thoroughly. If it's a receipt or bill, summarize the items "
@@ -602,10 +830,21 @@ class TelegramService:
                     return
                 tg_file = await doc.get_file()
                 raw_bytes = bytes(await tg_file.download_as_bytearray())
-                fname = (doc.file_name or "").lower()
+                fname = (doc.file_name or f"file_{update.message.message_id}").strip()
+                save_filename = os.path.basename(fname)
+                fname_lower = fname.lower()
                 doc_mime = (doc.mime_type or "application/octet-stream").lower()
 
-                if doc_mime.startswith("text/") or fname.endswith(
+                if caption.lower().startswith("/save") and self._is_owner(update):
+                    config.INBOX_DIR.mkdir(parents=True, exist_ok=True)
+                    dest = config.INBOX_DIR / save_filename
+                    dest.write_bytes(raw_bytes)
+                    await update.message.reply_text(
+                        f"💾 Saved '{save_filename}' ({len(raw_bytes) / 1024:.1f} KB) to PC Inbox:\n{dest}"
+                    )
+                    return
+
+                if doc_mime.startswith("text/") or fname_lower.endswith(
                     (".txt", ".md", ".py", ".json", ".csv", ".log", ".yaml", ".yml")
                 ):
                     decoded = raw_bytes.decode("utf-8", errors="replace")[:12000]
@@ -618,10 +857,19 @@ class TelegramService:
                         prompt = f"Analyze and summarize this attached file ({doc.file_name})."
                 else:
                     await update.message.reply_text(
-                        f"Unsupported file type ({doc_mime}). Send photos, PDFs, or text/code files."
+                        f"Unsupported file type ({doc_mime}). Send photos, PDFs, or text/code files (or use caption '/save' to save any file to PC)."
                     )
                     return
             else:
+                return
+
+            if caption.lower().startswith("/save") and media_bytes and save_filename and self._is_owner(update):
+                config.INBOX_DIR.mkdir(parents=True, exist_ok=True)
+                dest = config.INBOX_DIR / save_filename
+                dest.write_bytes(media_bytes)
+                await update.message.reply_text(
+                    f"💾 Saved '{save_filename}' ({len(media_bytes) / 1024:.1f} KB) to PC Inbox:\n{dest}"
+                )
                 return
 
             ctx = self._make_ctx(context, chat_id, user_id)
@@ -668,7 +916,7 @@ class TelegramService:
             if not text:
                 await update.message.reply_text("I didn't catch anything in that.")
                 return
-            await update.message.reply_text(f"Heard: {text}")
+            await update.message.reply_text(f"🎙 Heard: {text}")
             if not self.respond_fn:
                 return
             ctx = self._make_ctx(context, chat_id, user_id)
@@ -678,18 +926,7 @@ class TelegramService:
             typing_task.cancel()
 
         await self.send_long(context.bot, chat_id, reply)
-
-        if self.tts_fn:
-            try:
-                path = await self.tts_fn(reply)
-                try:
-                    with open(path, "rb") as f:
-                        await context.bot.send_voice(chat_id, f)
-                finally:
-                    if os.path.exists(path):
-                        os.unlink(path)
-            except Exception:
-                log.exception("Voice reply TTS failed")
+        await self._send_tts_reply(context.bot, chat_id, reply, user_id=user_id)
 
     @staticmethod
     async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -700,12 +937,17 @@ class TelegramService:
         return [
             BotCommand("start", "Greeting and quick overview"),
             BotCommand("help", "Show available commands"),
+            BotCommand("voicemode", "Toggle 2-way Marvel JARVIS voice chat"),
             BotCommand("briefing", "Morning debrief now"),
+            BotCommand("evening", "Evening reflection & wrap-up"),
             BotCommand("tasks", "List & complete open tasks"),
             BotCommand("reminders", "List & cancel reminders"),
-            BotCommand("expenses", "30-day expense report"),
-            BotCommand("habits", "7-day habit & expense stats"),
+            BotCommand("expenses", "30-day expense report & chart"),
+            BotCommand("habits", "Habit streaks & heatmap chart"),
+            BotCommand("notes", "Second Brain knowledge vault"),
+            BotCommand("watch", "Active price-drop watches"),
             BotCommand("pc", "PC status & remote control"),
+            BotCommand("clip", "Read or set PC clipboard"),
             BotCommand("lock", "Lock Windows PC screen"),
             BotCommand("memory", "List saved memories & preferences"),
             BotCommand("status", "Show Jarvis status"),
@@ -720,7 +962,9 @@ class TelegramService:
         app.add_handler(CommandHandler("start", self.cmd_start, block=False))
         app.add_handler(CommandHandler("help", self.cmd_help, block=False))
         app.add_handler(CommandHandler("myid", self.cmd_myid, block=False))
+        app.add_handler(CommandHandler(["voicemode", "voice"], self.cmd_voicemode, block=False))
         app.add_handler(CommandHandler("briefing", self.cmd_briefing, block=False))
+        app.add_handler(CommandHandler("evening", self.cmd_evening, block=False))
         app.add_handler(CommandHandler("call", self.cmd_call, block=False))
         app.add_handler(CommandHandler(["reset", "clear"], self.cmd_reset, block=False))
         app.add_handler(CommandHandler("status", self.cmd_status, block=False))
@@ -729,7 +973,10 @@ class TelegramService:
         app.add_handler(CommandHandler("reminders", self.cmd_reminders, block=False))
         app.add_handler(CommandHandler("expenses", self.cmd_expenses, block=False))
         app.add_handler(CommandHandler(["habits", "stats"], self.cmd_habits, block=False))
+        app.add_handler(CommandHandler(["notes", "brain"], self.cmd_notes, block=False))
+        app.add_handler(CommandHandler(["watch", "watches"], self.cmd_watch, block=False))
         app.add_handler(CommandHandler(["pc", "pcstatus"], self.cmd_pc, block=False))
+        app.add_handler(CommandHandler(["clip", "clipboard"], self.cmd_clip, block=False))
         app.add_handler(CommandHandler("lock", self.cmd_lock, block=False))
         app.add_handler(CommandHandler(["memory", "memories"], self.cmd_memory, block=False))
         app.add_handler(CallbackQueryHandler(self.handle_callback, block=False))

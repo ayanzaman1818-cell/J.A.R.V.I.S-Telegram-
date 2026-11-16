@@ -85,7 +85,7 @@ async def send_briefing(bot: Any, chat_id: int, job_queue: Any = None) -> None:
 
     if config.BRIEFING_VOICE:
         try:
-            path = await voice.tts_file(text)
+            path = await voice.tts_file(text, user_id=chat_id)
             try:
                 with open(path, "rb") as f:
                     await bot.send_voice(chat_id, f)
@@ -100,3 +100,64 @@ async def send_briefing(bot: Any, chat_id: int, job_queue: Any = None) -> None:
             await voice.phone_call(text)
         except Exception:
             log.exception("Briefing call failed")
+
+
+async def build_evening_briefing(ctx: ToolContext) -> str:
+    """Build an evening reflection summarizing open tasks, today's expenses, habits, and upcoming reminders."""
+    tasks = db.list_tasks(user_id=ctx.user_id)
+    open_tasks_text = (
+        "\n".join(f"- [{t['priority']}] {t['title']}" for t in tasks[:10])
+        or "All clear! No open tasks remaining."
+    )
+    exp_sum = db.expense_summary(days=1, user_id=ctx.user_id)
+    exp_text = (
+        ", ".join(f"{t['total']} {t['currency']} ({t['count']} items)" for t in exp_sum["totals"])
+        or "None logged today."
+    )
+    habits = db.habit_summary(days=1, user_id=ctx.user_id)
+    habit_text = (
+        ", ".join(f"{h['habit']}: {h['total_value']} {h['unit']}" for h in habits)
+        or "None logged today."
+    )
+    reminders = db.upcoming_reminders(limit=8, user_id=ctx.user_id)
+    reminder_text = (
+        "\n".join(f"- {r['due_at']}: {r['message']}" for r in reminders)
+        or "None scheduled."
+    )
+    today = datetime.now(config.get_zoneinfo()).strftime("%A %d %B")
+
+    prompt = f"""Deliver the user's evening reflection and wrap-up for {today}.
+
+Remaining open tasks:
+{open_tasks_text}
+
+Today's logged expenses:
+{exp_text}
+
+Today's logged habits:
+{habit_text}
+
+Upcoming reminders:
+{reminder_text}
+
+Format: a calm, concise evening wrap-up in JARVIS character. Mention today's logged habits and spending, note any remaining high-priority tasks or tomorrow's reminders, and ask if there are any final expenses or habits to record before turning in for the night. Under 180 words. Plain text only, no markdown."""
+    return await agent.simple(prompt, user_id=ctx.user_id)
+
+
+async def send_evening_briefing(bot: Any, chat_id: int, job_queue: Any = None) -> None:
+    ctx = ToolContext(bot=bot, chat_id=chat_id, job_queue=job_queue, user_id=chat_id)
+    text = await build_evening_briefing(ctx)
+    for i in range(0, max(1, len(text)), 4000):
+        await bot.send_message(chat_id, text[i : i + 4000] or "Good evening.")
+
+    if config.BRIEFING_VOICE and not config.is_quiet_hours():
+        try:
+            path = await voice.tts_file(text, user_id=chat_id)
+            try:
+                with open(path, "rb") as f:
+                    await bot.send_voice(chat_id, f)
+            finally:
+                if os.path.exists(path):
+                    os.unlink(path)
+        except Exception:
+            log.exception("Evening briefing voice note failed")
