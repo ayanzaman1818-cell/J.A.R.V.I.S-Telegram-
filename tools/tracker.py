@@ -39,7 +39,11 @@ async def log_expense(
     curr = (currency or "BDT").strip().upper()
     cat = (category or "general").strip().lower()
     desc = f" ({note.strip()})" if note.strip() else ""
-    return f"Logged expense #{exp_id}: {amount:.2f} {curr} under [{cat}]{desc}."
+    msg = f"Logged expense #{exp_id}: {amount:.2f} {curr} under [{cat}]{desc}."
+    alert = db.check_budget_alert(cat, curr, user_id=ctx.user_id)
+    if alert:
+        msg = f"{msg}\n{alert}"
+    return msg
 
 
 @tool(
@@ -122,9 +126,57 @@ async def habit_report(ctx: ToolContext, days: int = 7) -> str:
     rows = db.habit_summary(days=days, user_id=ctx.user_id)
     if not rows:
         return f"No habits logged in the last {days} days."
+    matrix = db.daily_habit_matrix(days=max(days, 14), user_id=ctx.user_id)
+    streaks = {h["habit"]: h.get("streak", 0) for h in matrix.get("habits", [])}
     lines = [f"Habit summary (last {days} days):"]
     for r in rows:
+        s = streaks.get(r["habit"], 0)
+        streak_tag = f" [🔥 {s}d streak]" if s > 0 else ""
         lines.append(
-            f"- {r['habit']}: {r['total_value']} {r['unit']} across {r['entries']} session(s)"
+            f"- {r['habit']}: {r['total_value']} {r['unit']} across {r['entries']} session(s){streak_tag}"
+        )
+    return "\n".join(lines)
+
+
+@tool(
+    "set_budget",
+    "Set a monthly spending limit for an expense category (e.g. 'food', 'groceries', 'shopping').",
+    {
+        "category": {"type": "string", "description": "Expense category name."},
+        "monthly_limit": {"type": "number", "description": "Monthly spending cap (> 0)."},
+        "currency": {"type": "string", "description": "Currency code (default 'BDT')."},
+    },
+    ["category", "monthly_limit"],
+)
+async def set_budget(
+    ctx: ToolContext, category: str, monthly_limit: float, currency: str = "BDT"
+) -> str:
+    if monthly_limit <= 0:
+        return "Monthly budget limit must be greater than 0."
+    db.set_budget(
+        category=category,
+        monthly_limit=monthly_limit,
+        currency=currency,
+        user_id=ctx.user_id,
+    )
+    return (
+        f"Monthly budget set for [{category.strip().lower()}]: "
+        f"{monthly_limit:.2f} {(currency or 'BDT').strip().upper()}."
+    )
+
+
+@tool(
+    "budget_report",
+    "Check current month's spending against configured category budgets.",
+)
+async def budget_report(ctx: ToolContext) -> str:
+    budgets = db.list_budgets(user_id=ctx.user_id)
+    if not budgets:
+        return "No monthly category budgets set yet. Use set_budget to configure one."
+    lines = ["Monthly Budget Status:"]
+    for b in budgets:
+        status = "⚠️ OVER" if b["percent"] >= 100 else ("⚡ HIGH" if b["percent"] >= 80 else "✅ OK")
+        lines.append(
+            f"- {b['category']}: {b['spent']:.2f} / {b['monthly_limit']:.2f} {b['currency']} ({b['percent']:.1f}%) [{status}]"
         )
     return "\n".join(lines)
