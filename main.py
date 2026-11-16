@@ -20,6 +20,13 @@ async def post_init(app: Application) -> None:
     if config.OWNER_ID:
         try:
             await app.bot.send_message(config.OWNER_ID, "Jarvis online.")
+            from services import voice
+
+            clip = voice.pick_openpeon_clip(category="session.start", query="welcome home")
+            if clip and not config.is_quiet_hours():
+                clip_path, label = clip
+                with open(clip_path, "rb") as f:
+                    await app.bot.send_voice(config.OWNER_ID, f, caption=f'🎩 "{label}"')
         except Exception:
             log.warning("Could not send startup notification to OWNER_ID=%s", config.OWNER_ID)
 

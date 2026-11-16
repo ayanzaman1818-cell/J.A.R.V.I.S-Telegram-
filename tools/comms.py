@@ -15,14 +15,78 @@ from tools.base import ToolContext, tool
     ["text"],
 )
 async def speak(ctx: ToolContext, text: str) -> str:
-    path = await voice.tts_file(text)
+    path = await voice.tts_file(text, user_id=ctx.user_id)
     try:
-        with open(path, "rb") as f:
-            await ctx.bot.send_voice(ctx.chat_id, f)
+        if ctx.bot:
+            with open(path, "rb") as f:
+                await ctx.bot.send_voice(ctx.chat_id, f)
     finally:
         if os.path.exists(path):
             os.unlink(path)
     return "Voice note sent."
+
+
+@tool(
+    "set_voice_chat_mode",
+    "Enable or disable continuous two-way Telegram voice conversation mode (where JARVIS replies with spoken voice notes automatically), and optionally switch the TTS voice preset (jarvis, sonia, christopher, jenny, aria, natasha).",
+    {
+        "enabled": {
+            "type": "boolean",
+            "description": "True to enable two-way voice chat mode, False to return to text-only default.",
+        },
+        "voice_preset": {
+            "type": "string",
+            "description": "Optional voice preset ('jarvis', 'sonia', 'christopher', 'jenny', 'aria', 'natasha').",
+        },
+    },
+    ["enabled"],
+)
+async def set_voice_chat_mode(
+    ctx: ToolContext, enabled: bool, voice_preset: str = ""
+) -> str:
+    voice.set_voice_mode(bool(enabled), user_id=ctx.user_id)
+    v_str = ""
+    if voice_preset.strip():
+        chosen = voice.set_user_tts_voice(voice_preset.strip(), user_id=ctx.user_id)
+        v_str = f" Voice set to {chosen}."
+    state = "enabled (I will reply with spoken voice messages)" if enabled else "disabled (text-only unless you send a voice note)"
+    return f"Two-way Telegram voice chat mode {state}.{v_str}"
+
+
+@tool(
+    "jarvis_voice_clip",
+    "Send an authentic Paul Bettany Marvel JARVIS voice clip from the bundled openpeon-jarvis sound pack.",
+    {
+        "category": {
+            "type": "string",
+            "enum": [
+                "session.start",
+                "task.acknowledge",
+                "task.complete",
+                "task.error",
+                "input.required",
+                "resource.limit",
+                "user.spam",
+            ],
+            "description": "Event category of the Marvel JARVIS clip (default 'task.acknowledge').",
+        },
+        "query": {
+            "type": "string",
+            "description": "Optional phrase search (e.g. 'welcome home', 'at your service', 'new element').",
+        },
+    },
+)
+async def jarvis_voice_clip(
+    ctx: ToolContext, category: str = "task.acknowledge", query: str = ""
+) -> str:
+    picked = voice.pick_openpeon_clip(category=category, query=query)
+    if not picked:
+        return "Marvel JARVIS sound pack is not available."
+    clip_path, label = picked
+    if ctx.bot and os.path.exists(clip_path):
+        with open(clip_path, "rb") as f:
+            await ctx.bot.send_voice(ctx.chat_id, f, caption=f'🎩 "{label}"')
+    return f'Sent Marvel JARVIS voice clip: "{label}"'
 
 
 @tool(
