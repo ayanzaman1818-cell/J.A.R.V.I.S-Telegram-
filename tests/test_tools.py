@@ -23,14 +23,13 @@ class ToolValidationTests(unittest.IsolatedAsyncioTestCase):
         self.p2 = patch("tools.memory_tools.db", self.repo)
         self.p3 = patch("tools.integrations.db", self.repo)
         self.p4 = patch("tools.tracker.db", self.repo)
-        self.p1.start()
-        self.p2.start()
-        self.p3.start()
-        self.p4.start()
-        self.addCleanup(self.p1.stop)
-        self.addCleanup(self.p2.stop)
-        self.addCleanup(self.p3.stop)
-        self.addCleanup(self.p4.stop)
+        self.p5 = patch("tools.charts.db", self.repo)
+        self.p6 = patch("tools.knowledge.db", self.repo)
+        self.p7 = patch("tools.watchdog.db", self.repo)
+        self.p8 = patch("services.voice.db", self.repo)
+        for p in (self.p1, self.p2, self.p3, self.p4, self.p5, self.p6, self.p7, self.p8):
+            p.start()
+            self.addCleanup(p.stop)
         self.addCleanup(self.tmp.cleanup)
         self.ctx = ToolContext(bot=None, chat_id=777, user_id=777)
 
@@ -113,6 +112,77 @@ class ToolValidationTests(unittest.IsolatedAsyncioTestCase):
         with patch("config.OWNER_ID", 777):
             status = await tools.run_tool(self.ctx, "pc_status", {})
             self.assertIn("Host OS:", status)
+
+    async def test_visual_png_charts_and_budgets(self):
+        await tools.run_tool(
+            self.ctx,
+            "set_budget",
+            {"category": "food", "monthly_limit": 500, "currency": "BDT"},
+        )
+        exp_res = await tools.run_tool(
+            self.ctx,
+            "log_expense",
+            {"amount": 450, "currency": "BDT", "category": "food", "note": "Biryani"},
+        )
+        self.assertIn("Budget alert", exp_res)
+
+        b_rep = await tools.run_tool(self.ctx, "budget_report", {})
+        self.assertIn("450.00 / 500.00 BDT", b_rep)
+
+        e_chart = await tools.run_tool(self.ctx, "expense_chart", {"days": 30})
+        self.assertIn("Sent 30-day expense chart", e_chart)
+
+        await tools.run_tool(
+            self.ctx, "log_habit", {"habit": "coding", "value": 2, "unit": "hours"}
+        )
+        h_chart = await tools.run_tool(self.ctx, "habit_chart", {"days": 14})
+        self.assertIn("Sent 14-day habit streak chart", h_chart)
+
+    async def test_second_brain_knowledge_vault(self):
+        saved = await tools.run_tool(
+            self.ctx,
+            "save_note",
+            {
+                "title": "Mark XLII Suit Calibration",
+                "content": "Micro-repeater propulsion thrusters require 4.2 GW repulsor output.",
+                "tags": "marvel,ironman",
+            },
+        )
+        self.assertIn("Saved to Second Brain #1", saved)
+
+        found = await tools.run_tool(
+            self.ctx, "search_knowledge", {"query": "repulsor thrusters"}
+        )
+        self.assertIn("Mark XLII Suit Calibration", found)
+
+        listed = await tools.run_tool(self.ctx, "list_notes", {"tag": "marvel"})
+        self.assertIn("Mark XLII Suit Calibration", listed)
+
+    async def test_price_watchdog_and_voice_mode(self):
+        from tools.watchdog import extract_price_from_html
+
+        html = '<meta property="product:price:amount" content="149.99" />'
+        self.assertEqual(extract_price_from_html(html), 149.99)
+        self.assertEqual(extract_price_from_html("Sale price: $89.50 today!"), 89.50)
+
+        v_res = await tools.run_tool(
+            self.ctx,
+            "set_voice_chat_mode",
+            {"enabled": True, "voice_preset": "marvel"},
+        )
+        self.assertIn("enabled", v_res)
+        self.assertIn("en-GB-RyanNeural", v_res)
+
+        from services import voice
+
+        matched = voice.match_openpeon_clip("Welcome home, sir.")
+        self.assertIsNotNone(matched)
+        clip_res = await tools.run_tool(
+            self.ctx,
+            "jarvis_voice_clip",
+            {"category": "session.start", "query": "welcome home"},
+        )
+        self.assertIn("Welcome home, sir.", clip_res)
 
 
 if __name__ == "__main__":

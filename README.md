@@ -27,8 +27,8 @@ Some optional integrations require separate accounts and credentials.
 Clone the repository, or download and extract its ZIP:
 
 ``` bash
-git clone https://github.com/ayanzaman1818-cell/J.A.R.V.I.S-Telegram-.git
-cd J.A.R.V.I.S-Telegram-.git
+git clone https://github.com/YOUR_USERNAME/YOUR_REPOSITORY.git
+cd YOUR_REPOSITORY
 ```
 
 ### 2. Create a virtual environment
@@ -111,11 +111,32 @@ USER_NAME=Sir
 LOCATION=Dhaka
 TIMEZONE=Asia/Dhaka
 BRIEFING_TIME=06:40
+EVENING_BRIEFING_TIME=21:30
+
+# Proactive background health alerts
+PROACTIVE_ALERTS=true
+BATTERY_ALERT_THRESHOLD=20
 
 # Optional: Groq Whisper voice transcription
 GROQ_API_KEY=
 
-# Optional: Composio integrations
+# Voice Engine: Fish Audio (Free custom Paul Bettany clone)
+FISH_API_KEY=
+FISH_MODEL_ID=
+FISH_MODEL=s2.1-pro-free
+
+# Voice Engine: ElevenLabs (Optional custom/community clone)
+ELEVENLABS_API_KEY=
+ELEVENLABS_VOICE_ID=onwK4e9ZLuTAKqWW03F9
+ELEVENLABS_MODEL=eleven_multilingual_v2
+
+# Voice Engine: Microsoft Edge-TTS (Free unlimited fallback with Marvel prosody)
+TTS_VOICE=en-GB-RyanNeural
+TTS_RATE=+5%
+TTS_PITCH=-4Hz
+VOICE_CHAT_DEFAULT=false
+
+# Optional: Composio integrations (Gmail, Drive, Calendar)
 COMPOSIO_API_KEY=
 COMPOSIO_USER_ID=
 COMPOSIO_GMAIL_ACCOUNT=
@@ -128,21 +149,23 @@ TWILIO_AUTH_TOKEN=
 TWILIO_NUMBER=
 MY_PHONE=
 TWILIO_VOICE=alice
+TWILIO_WEBHOOK_URL=
 
-# Optional: briefing and text-to-speech settings
+# Optional: Briefing delivery options
 BRIEFING_VOICE=true
 BRIEFING_CALL=false
-TTS_VOICE=en-GB-RyanNeural
 
-# Optional: policy / knowledge-base settings
+# Quiet-hours window & local storage paths
 QUIET_HOURS_START=22:00
 QUIET_HOURS_END=07:00
+INBOX_DIR=inbox
+KNOWLEDGE_LOCAL_DIR=notes
 KNOWLEDGE_DRIVE_FOLDER=
 ```
 
 This is a template, not a guarantee that every variable is enabled in
-every revision. Check `config.py`, `main.py`, `voice.py`, and
-`composio_tools.py` in the version you are running. Remove unused
+every revision. Check `config.py`, `main.py`, `services/voice.py`, and
+tool modules in the version you are running. Remove unused
 settings and add any additional variables required by your
 implementation.
 
@@ -194,11 +217,43 @@ implementation.
                                                               scheduling and
                                                               time-aware features
 
-  `BRIEFING_TIME`                     Optional                Local time for
-                                                              scheduled briefings
+  `BRIEFING_TIME`                     Optional                Local time for morning
+                                                              briefing (HH:MM)
+
+  `EVENING_BRIEFING_TIME`             Optional                Local time for evening
+                                                              reflection (HH:MM)
+
+  `PROACTIVE_ALERTS`                  Optional                Enable PC battery, RAM,
+                                                              and disk space alerts
+
+  `BATTERY_ALERT_THRESHOLD`           Optional                Battery % to alert on
+                                                              when unplugged (def 20)
 
   `GROQ_API_KEY`                      Optional                Groq API key for
                                                               Whisper transcription
+
+  `FISH_API_KEY`                      Optional                Fish Audio API key for
+                                                              cloned JARVIS voice
+
+  `FISH_MODEL_ID`                     Optional                Fish Audio voice model
+                                                              ID for cloned voice
+
+  `FISH_MODEL`                        Optional                Fish Audio model routing
+                                                              (default `s2.1-pro-free`)
+
+  `ELEVENLABS_API_KEY`                Optional                ElevenLabs API key for
+                                                              voice clone synthesis
+
+  `ELEVENLABS_VOICE_ID`               Optional                ElevenLabs voice ID
+
+  `TTS_VOICE`                         Optional                Edge-TTS voice name
+                                                              (default `en-GB-RyanNeural`)
+
+  `TTS_RATE` / `TTS_PITCH`            Optional                Edge-TTS Marvel prosody
+                                                              tuning (`+5%`, `-4Hz`)
+
+  `VOICE_CHAT_DEFAULT`                Optional                Default two-way voice
+                                                              mode (`true`/`false`)
 
   `COMPOSIO_API_KEY`                  Optional                Composio project API
                                                               key
@@ -228,20 +283,23 @@ implementation.
 
   `TWILIO_VOICE`                      Optional                Twilio voice selection
 
-  `BRIEFING_VOICE`                    Optional                Enables voice briefing,
-                                                              if implemented
+  `TWILIO_WEBHOOK_URL`                Optional                Twilio webhook for
+                                                              two-way speech gather
+
+  `BRIEFING_VOICE`                    Optional                Enables voice note
+                                                              briefings
 
   `BRIEFING_CALL`                     Optional                Enables phone-call
-                                                              briefings, if
-                                                              implemented
+                                                              briefings
 
-  `TTS_VOICE`                         Optional                Edge TTS voice name
+  `QUIET_HOURS_START` /               Optional                Quiet-hours window
+  `QUIET_HOURS_END`                                           (e.g. 22:00 to 07:00)
 
-  `QUIET_HOURS_START` /               Optional                Quiet-hours window, if
-  `QUIET_HOURS_END`                                           implemented
+  `INBOX_DIR`                         Optional                PC folder for `/save`
+                                                              file downloads
 
-  `KNOWLEDGE_DRIVE_FOLDER`            Optional                Drive knowledge-base
-                                                              folder, if implemented
+  `KNOWLEDGE_LOCAL_DIR`               Optional                Folder for Second Brain
+                                                              local markdown notes
   -----------------------------------------------------------------------------------
 
 Use `true` or `false` for boolean values. Follow the parsing rules in
@@ -341,53 +399,102 @@ Press `Ctrl+C` in the terminal to stop Jarvis.
 
 ## Features & Commands
 
-### Core & New Capabilities
+### Core & Advanced Capabilities
 
-- **Vision & Document Analysis:** Send photos, screenshots, or PDF/text files directly in Telegram with an optional caption to analyze receipts, debug code screenshots, extract text, or summarize documents.
-- **PC / Desktop Remote Control:** Check CPU/RAM/Disk/Battery and top processes, capture live desktop screenshots, control system volume/media keys, launch desktop apps, or lock your Windows workstation remotely.
-- **YouTube Video Summarizer:** Paste any YouTube link (including Shorts) and ask JARVIS to summarize or answer questions from the video transcript.
-- **Spotify & Desktop Media Control:** Check the currently playing Spotify track, play/pause/skip tracks, or search and launch songs directly in Spotify.
-- **Expense & Habit Tracker:** Log daily spending and habits in natural language, view 7-day/30-day category breakdowns, track habit streaks, and receive automatic summaries in your morning briefing.
-- **Interactive Inline Buttons:** Mark tasks done, snooze reminders (`+15m` / `+1h`), cancel reminders, or approve/cancel pending actions with one-tap inline Telegram buttons.
+- **Marvel JARVIS Voice & Sound Pack:** 
+  - **Fish Audio Custom Clone (`fish.audio`):** Full integration with Fish Audio using the free `s2.1-pro-free` model for custom cloned MCU JARVIS voice synthesis.
+  - **Bundled `openpeon-jarvis` Sound Pack:** 66 authentic 44.1kHz studio MP3 voice clips from the MCU. Plays the genuine Paul Bettany *"Welcome home, sir."* greeting upon startup, automatically matches canon quotes (*"Congratulations, sir. You have created a new element."*, *"As always, sir, a great pleasure watching you work."*), and provides an interactive Telegram soundboard.
+  - **Tuned Edge-TTS Fallback:** Free, unlimited Microsoft `en-GB-RyanNeural` calibrated with custom prosody (`rate=+5%`, `pitch=-4Hz`) for a crisp British AI butler cadence.
+  - **ElevenLabs Ready:** Includes master concatenated audio samples in `assets/elevenlabs_samples/` and a 1-command cloning helper script (`py clone_jarvis_voice.py`).
+- **Two-Way Telegram Voice Chat Mode:** Toggle continuous two-way voice chat (`/voicemode`) where JARVIS replies with spoken voice notes aloud for every message, with voice presets (`marvel`, `sonia`, `christopher`, `aria`).
+- **Visual Charts & Financial Intelligence:**
+  - **Expense Analytics Charts:** Generate dark-mode PNG category breakdown and daily spending trend charts directly in Telegram.
+  - **Habit Streak Heatmaps:** Generate visual 14-day consistency heatmaps and active streak badges.
+  - **Monthly Category Budgets:** Set spending caps per category (`set_budget`) with automatic `80%` warning and `100%` exceeded threshold alerts.
+- **Proactive PC Health & Background Monitor:** Background APScheduler watchdog checks PC vitals every 10 minutes and sends proactive Telegram alerts if your laptop battery drops below 20% while unplugged, or if RAM/disk exceeds 93%.
+- **Daily Morning & Evening Debriefings:**
+  - **Morning Briefing (`/briefing`):** Weather forecast, appointments, unread VIP emails, pending reminders, 7-day finances, and top tech news.
+  - **Evening Wrap-Up (`/evening`):** End-of-day reflection at 9:30 PM summarizing checked-off tasks, today's logged expenses & habits, and tomorrow's upcoming events.
+- **PC Desktop Remote Control & Clipboard Sync:**
+  - **Two-Way Clipboard Sync:** Read PC clipboard text into Telegram or copy text/URLs directly to your PC clipboard (`/clip <text>`).
+  - **Focus & Environment Modes:** Activate desktop presets (`/pc` or natural language): `work` (opens VS Code + Spotify), `night` (mutes media + locks PC), `chill` (Spotify playback), and `meeting` (instant mute).
+  - **Remote File Transfers & Inbox:** List files in Downloads/Desktop/Documents, send PC files to Telegram, or send any photo/document to Telegram with caption `/save` to store it directly in `inbox/`.
+  - **Workstation Lock & Live Screenshots:** Capture multi-monitor desktop screenshots or lock Windows workstation screen immediately (`/lock`).
+- **Second Brain Knowledge Vault (RAG & Read-Later):**
+  - **Semantic + Keyword Hybrid Search:** Search saved notes, code snippets, and local markdown files in `notes/` using Gemini vector embeddings and SQLite.
+  - **"Read Later" Web Article Archiver:** Forward any article URL (`archive_article`) to extract clean readable text, generate an executive summary, and save it in your Second Brain vault.
+- **Automated Price-Drop Watchdog:** Monitor product URLs (`watch_price`, `/watch`) and receive instant Telegram deal alerts when prices drop to or below your target threshold.
+- **Vision & Document Analysis:** Send photos, receipts, or PDF/text files in Telegram with an optional caption to analyze bills, debug code screenshots, or summarize research papers.
+- **YouTube Video Summarizer:** Paste any YouTube link (including Shorts) to extract timestamped transcripts and generate comprehensive summaries.
+- **Spotify & Desktop Media Control:** Inspect currently playing track, toggle play/pause, skip tracks, adjust volume, or search and launch tracks in Spotify.
+- **Interactive Inline Buttons:** One-tap inline Telegram buttons for task completion, reminder snooze (`+10m`), action approval, PC controls, voice presets, and visual chart generation.
 
 ### Telegram Slash Commands
 
 | Command | Description |
 | :--- | :--- |
 | `/start`, `/help` | Display welcome guide and available commands |
-| `/status` | Check system health, configured models, and integration status |
-| `/briefing` | Generate an on-demand morning briefing (weather, tasks, reminders, expenses, habits, news) |
+| `/voicemode`, `/voice` | Toggle two-way voice chat mode, test voices, or play MCU sound clips |
+| `/status` | Check system health, active voice engine, models, and database counts |
+| `/model` | Inspect active Gemini models and circuit-breaker status |
+| `/briefing` | Generate and deliver your on-demand morning briefing |
+| `/evening` | Generate and deliver your 9:30 PM evening reflection & wrap-up |
 | `/tasks` | List open tasks with one-tap `✅ Done` inline buttons |
 | `/reminders` | List pending reminders with one-tap `❌ Cancel` inline buttons |
-| `/expenses` | View your 30-day expense breakdown and recent transactions |
-| `/habits`, `/stats` | View your 30-day habit streaks and completion stats |
-| `/pc`, `/pcstatus` | Check live Windows PC CPU, RAM, disk, battery, and top processes |
-| `/lock` | Immediately lock your Windows workstation |
-| `/memory` | Inspect stored long-term memories and preferences |
-| `/audit` | View recent tool execution audit logs |
-| `/confirm`, `/cancel` | Confirm or cancel a pending high-impact action |
-| `/clear` | Clear current conversation context |
+| `/expenses` | View 30-day expense breakdown with `📊 Generate Expense Chart` button |
+| `/habits`, `/stats` | View habit streaks and 7-day stats with `🔥 Habit Streak Chart` button |
+| `/notes [query]`, `/brain` | Search or list notes and articles in your Second Brain knowledge vault |
+| `/watch` | List and manage active product price-drop watches |
+| `/pc`, `/pcstatus` | Check live PC CPU, RAM, disk, battery, and quick remote control buttons |
+| `/clip [text]` | Read PC clipboard, or copy `<text>` to your PC clipboard |
+| `/lock` | Immediately lock your Windows workstation (owner only) |
+| `/memory` | Inspect stored long-term memories and user preferences |
+| `/call <message>` | Ring your phone with a spoken message via Twilio (owner only) |
+| `/reset`, `/clear` | Clear current short-term conversation context |
+| `/myid` | Display your numeric Telegram user ID |
+
+## Voice Engine Setup
+
+JARVIS features a multi-tiered voice architecture:
+
+### 1. Fish Audio (`fish.audio` — Recommended for Cloned Voice)
+Fish Audio offers free custom voice cloning and free API inference via their `s2.1-pro-free` model.
+1. Create an account at [fish.audio](https://fish.audio/) and create a voice clone of JARVIS.
+2. In your profile, create an **API Key**.
+3. Copy your voice **Model ID** from the model URL (e.g. `https://fish.audio/m/<model_id>/`).
+4. Add to `.env`:
+   ```dotenv
+   FISH_API_KEY=your_fish_audio_api_key
+   FISH_MODEL_ID=your_fish_model_id
+   FISH_MODEL=s2.1-pro-free
+   ```
+
+### 2. Built-in `openpeon-jarvis` Sound Pack (100% Free, Zero Config)
+Bundled in `assets/openpeon_jarvis/`. Contains 66 high-quality 44.1kHz MCU Paul Bettany clips. Automatically plays on startup and matches canon phrases with zero latency.
+
+### 3. Microsoft Edge-TTS (100% Free, Unlimited Fallback)
+If no cloud API keys are provided, JARVIS automatically uses Microsoft Edge Neural TTS (`en-GB-RyanNeural`) tuned with Paul Bettany prosody (`rate=+5%`, `pitch=-4Hz`). No keys or accounts required.
+
+### 4. ElevenLabs (Optional)
+If you have an ElevenLabs key, add `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID` to `.env`. Master training samples are provided in `assets/elevenlabs_samples/` or run `py clone_jarvis_voice.py`.
 
 ## Optional integrations
 
 ### Gmail, Google Drive, and Calendar
 
 Configure Composio and connect the relevant Google accounts. Available
-actions depend on the tools implemented in the current `tools.py` and
-`composio_tools.py`.
+actions depend on the tools implemented in the current `tools/` suite.
 
 Keep read-only operations read-only. Actions that send messages, create
-events, delete data, or share files should require explicit
-confirmation.
+events, delete data, or share files require explicit confirmation (`/confirm`).
 
 ### Voice
 
-Set `GROQ_API_KEY` if the installed voice handler uses Groq Whisper.
-Voice output may use Edge TTS and `TTS_VOICE`.
+Set `GROQ_API_KEY` for Whisper voice transcription, or use Gemini multimodal audio understanding as an automatic fallback.
 
 ### Scheduled briefings and reminders
 
-Set `TIMEZONE` and, if supported, `BRIEFING_TIME`. The application must
+Set `TIMEZONE`, `BRIEFING_TIME`, and `EVENING_BRIEFING_TIME`. The application must
 remain running for in-process APScheduler jobs to execute. Use an
 always-on computer or managed server for continuous operation.
 
