@@ -530,22 +530,25 @@ class DesktopOverlayService:
         cls_buf = ctypes.create_unicode_buffer(128)
 
         def _cb(hwnd: int, _lparam: int) -> bool:
-            if not user32.IsWindowVisible(hwnd):
-                return True
+            # Do NOT require IsWindowVisible(hwnd) for Spotify: when Spotify is closed/minimized to the
+            # Windows system tray, its top-level Chrome_WidgetWin_0 window becomes hidden (IsWindowVisible=False)
+            # while keeping the active "Artist - Song Title" window text!
             length = user32.GetWindowTextLengthW(hwnd)
             if length <= 0:
+                return True
+            user32.GetClassNameW(hwnd, cls_buf, 128)
+            cname = cls_buf.value
+            if not cname.startswith("Chrome_WidgetWin"):
                 return True
             buf = ctypes.create_unicode_buffer(length + 1)
             user32.GetWindowTextW(hwnd, buf, length + 1)
             title = buf.value.strip()
             if not title:
                 return True
-            user32.GetClassNameW(hwnd, cls_buf, 128)
-            cname = cls_buf.value
             t_low = title.lower()
             if t_low in ("spotify", "spotify free", "spotify premium"):
                 spotify_titles.append("PAUSED")
-            elif " - " in title and cname.startswith("Chrome_WidgetWin"):
+            elif " - " in title:
                 # Exclude browsers, VS Code, Discord, etc.
                 if not any(
                     b in t_low
@@ -562,7 +565,9 @@ class DesktopOverlayService:
                     )
                 ):
                     spotify_titles.insert(0, title)
-                elif "youtube music" in t_low or " - youtube" in t_low or "soundcloud" in t_low:
+                elif user32.IsWindowVisible(hwnd) and (
+                    "youtube music" in t_low or " - youtube" in t_low or "soundcloud" in t_low
+                ):
                     cleaned = (
                         title.replace(" - YouTube Music", "")
                         .replace(" - YouTube", "")

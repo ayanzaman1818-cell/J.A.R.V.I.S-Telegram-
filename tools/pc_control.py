@@ -425,8 +425,7 @@ def send_media_transport_command(action: str) -> None:
     lparam = app_cmd << 16
 
     def _cb(hwnd: int, _lp: int) -> bool:
-        if not user32.IsWindowVisible(hwnd):
-            return True
+        # Include hidden/system-tray Spotify windows so Prev/Play/Next works even when Spotify is minimized to tray
         user32.GetClassNameW(hwnd, cls_buf, 128)
         if not cls_buf.value.startswith("Chrome_WidgetWin"):
             return True
