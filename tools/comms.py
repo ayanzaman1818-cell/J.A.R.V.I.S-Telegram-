@@ -10,7 +10,7 @@ from tools.base import ToolContext, tool
 
 @tool(
     "speak",
-    "Send the user a spoken voice note in Telegram.",
+    "Send the user a spoken voice note in Telegram ONLY when the user explicitly asks you to speak, send a voice note, or read something aloud.",
     {"text": {"type": "string"}},
     ["text"],
 )
@@ -55,7 +55,7 @@ async def set_voice_chat_mode(
 
 @tool(
     "jarvis_voice_clip",
-    "Send an authentic Paul Bettany Marvel JARVIS voice clip from the bundled openpeon-jarvis sound pack.",
+    "Send an authentic Paul Bettany Marvel JARVIS voice clip ONLY when the user explicitly asks to hear a Marvel JARVIS sound clip or quote.",
     {
         "category": {
             "type": "string",

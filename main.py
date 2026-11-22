@@ -3,6 +3,13 @@
 from __future__ import annotations
 
 import logging
+import os
+import py_compile
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
 from telegram.ext import Application
 
 import config
@@ -10,6 +17,98 @@ from database.repository import db
 from services.telegram import TelegramService, build_telegram_app
 
 log = config.setup_logging()
+_HOT_RELOAD_TRIGGERED = False
+
+
+def _snapshot_source_mtimes() -> dict[str, float]:
+    """Return a map of watched .py files (and .env) to their current mtime."""
+    base = config.BASE_DIR
+    snap: dict[str, float] = {}
+    ignore_dirs = {".git", "__pycache__", ".venv", "venv", "backups", "inbox", "notes"}
+    for p in base.rglob("*.py"):
+        if any(part in ignore_dirs for part in p.parts):
+            continue
+        try:
+            snap[str(p)] = p.stat().st_mtime
+        except OSError:
+            pass
+    env_p = base / ".env"
+    if env_p.exists():
+        try:
+            snap[str(env_p)] = env_p.stat().st_mtime
+        except OSError:
+            pass
+    return snap
+
+
+def _start_hot_reload_watcher() -> None:
+    """Watch all project .py files (and .env) for changes and automatically hot-restart JARVIS in place."""
+
+    def _watch_loop() -> None:
+        global _HOT_RELOAD_TRIGGERED
+        baseline = _snapshot_source_mtimes()
+        while not _HOT_RELOAD_TRIGGERED:
+            time.sleep(1.0)
+            current = _snapshot_source_mtimes()
+            changed = [
+                path
+                for path, mtime in current.items()
+                if path not in baseline or mtime > baseline[path] + 0.001
+            ]
+            if not changed:
+                continue
+
+            # Debounce: wait 0.8s so multi-file edits finish writing to disk
+            time.sleep(0.8)
+            current = _snapshot_source_mtimes()
+            changed = [
+                path
+                for path, mtime in current.items()
+                if path not in baseline or mtime > baseline[path] + 0.001
+            ]
+
+            # Syntax guard: verify all modified .py files compile cleanly before restarting
+            syntax_ok = True
+            for c_path in changed:
+                if c_path.endswith(".py") and os.path.exists(c_path):
+                    try:
+                        py_compile.compile(c_path, doraise=True)
+                    except Exception as syn_err:
+                        log.warning(
+                            "Hot-reload paused: syntax error in %s (%s). Waiting for next save...",
+                            Path(c_path).name,
+                            syn_err,
+                        )
+                        syntax_ok = False
+                        break
+            if not syntax_ok:
+                baseline = current
+                continue
+
+            rel_names = ", ".join(Path(p).name for p in changed[:4])
+            log.info("🔄 Code change detected in [%s] — hot-restarting JARVIS now...", rel_names)
+            _HOT_RELOAD_TRIGGERED = True
+
+            try:
+                from services.desktop_overlay import stop_desktop_overlay
+
+                stop_desktop_overlay()
+            except Exception:
+                pass
+
+            env = os.environ.copy()
+            env["JARVIS_HOT_RELOAD"] = "1"
+            subprocess.Popen(
+                [sys.executable, str(config.BASE_DIR / "main.py"), *sys.argv[1:]],
+                cwd=str(config.BASE_DIR),
+                env=env,
+            )
+            logging.shutdown()
+            os._exit(0)
+
+    t = threading.Thread(target=_watch_loop, name="jarvis-hot-reload", daemon=True)
+    t.start()
+    log.info("Live Hot-Reload Watcher active (any .py / .env edit will automatically restart JARVIS)")
 
 
 async def post_init(app: Application) -> None:
@@ -53,7 +152,7 @@ async def post_init(app: Application) -> None:
     except Exception:
         log.warning("Could not start Native Telegram VoIP Calling userbot", exc_info=True)
 
-    if config.OWNER_ID:
+    if config.OWNER_ID and os.environ.get("JARVIS_HOT_RELOAD") != "1":
         try:
             await app.bot.send_message(config.OWNER_ID, "Jarvis online.")
             from services import voice
@@ -190,6 +289,7 @@ def main() -> None:
 
     _terminate_stale_jarvis_instances()
     db.init()
+    _start_hot_reload_watcher()
     service = create_service()
     app = build_telegram_app(
         service,

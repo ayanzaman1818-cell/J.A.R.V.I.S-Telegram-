@@ -290,9 +290,13 @@ class TelegramService:
             return
         if not update.message:
             return
-        try:
-            from brain.gemini import model_health
+        from brain.gemini import model_health, set_active_model
 
+        if context.args and self._is_owner(update):
+            chosen = set_active_model(" ".join(context.args).strip())
+            await update.message.reply_text(f"🧠 Switched active JARVIS LLM model to: `{chosen}`")
+
+        try:
             health = model_health()
         except Exception:
             health = {
@@ -304,12 +308,35 @@ class TelegramService:
             }
         paused = health["primary_paused_seconds"]
         state = f"paused ({paused}s remaining)" if paused else "healthy"
+        markup = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("☁️ Gemma 4 26B", callback_data="model_set:gemma26b"),
+                    InlineKeyboardButton("⚡ Gemini 3.5 Lite", callback_data="model_set:flashlite"),
+                ],
+                [
+                    InlineKeyboardButton("☁️ Gemini 3.8 Flash", callback_data="model_set:flash38"),
+                    InlineKeyboardButton("☁️ Gemma 4 31B", callback_data="model_set:gemma31b"),
+                ],
+                [
+                    InlineKeyboardButton("⚡ LM Studio: Qwen3 8B", callback_data="model_set:qwen38b"),
+                    InlineKeyboardButton("💻 LM Studio: Active Model", callback_data="model_set:lmstudio"),
+                ],
+                [
+                    InlineKeyboardButton("🌿 LM Studio: Bonsai 27B", callback_data="model_set:bonsai27b"),
+                    InlineKeyboardButton("💻 LM Studio: Qwen 2.5 7B", callback_data="model_set:qwen7b"),
+                ],
+            ]
+        )
         await update.message.reply_text(
-            "Gemini Model Routing:\n"
-            f"- Default: {health['primary']} ({state})\n"
-            f"- Fast: {health['fast']}\n"
-            f"- Deep: {health['deep']}\n"
-            f"- Fallback: {health['fallback']}"
+            "🧠 **JARVIS LLM Model Switcher**\n"
+            f"- Active Primary: `{health['primary']}` ({state})\n"
+            f"- Fast Model: `{health['fast']}`\n"
+            f"- Deep Model: `{health['deep']}`\n"
+            f"- Cloud Fallback: `{health['fallback']}`\n"
+            f"- LM Studio Server: `{health.get('local_base_url', 'http://127.0.0.1:1234/v1')}`\n\n"
+            "Tap a preset below to switch models live, or send `/model lmstudio:<model_name>`:",
+            reply_markup=markup,
         )
 
     async def cmd_tasks(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -500,7 +527,6 @@ class TelegramService:
                 voice_svc.set_voice_mode(False, user_id=user_id)
             elif args[0] in voice_svc.VOICE_PRESETS:
                 voice_svc.set_user_tts_voice(args[0], user_id=user_id)
-                voice_svc.set_voice_mode(True, user_id=user_id)
 
         active = voice_svc.is_voice_mode_enabled(user_id=user_id)
         engine = voice_svc.tts_engine_status(user_id=user_id)
@@ -779,6 +805,18 @@ class TelegramService:
                     await habit_chart(ctx, days=14)
                 return
 
+            if data.startswith("model_set:"):
+                if not self._is_owner(update):
+                    await query.answer("Owner only.", show_alert=True)
+                    return
+                preset = data.split(":", 1)[1]
+                from brain.gemini import set_active_model
+
+                chosen = set_active_model(preset)
+                await query.answer(f"Model set to {chosen}")
+                await query.message.reply_text(f"🧠 Active JARVIS LLM model switched to: `{chosen}`")
+                return
+
             if data.startswith("voice_mode:"):
                 mode_val = data.split(":", 1)[1] == "on"
                 from services import voice as voice_svc
@@ -794,10 +832,9 @@ class TelegramService:
                 from services import voice as voice_svc
 
                 chosen = voice_svc.set_user_tts_voice(preset, user_id=user_id)
-                voice_svc.set_voice_mode(True, user_id=user_id)
                 await query.answer(f"Voice set to {chosen}")
                 await query.message.reply_text(
-                    f"🎩 Voice updated to {preset.upper()} ({chosen}). Two-way voice chat is active."
+                    f"🎩 Voice updated to {preset.upper()} ({chosen})."
                 )
                 return
 

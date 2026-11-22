@@ -1,5 +1,34 @@
 # J.A.R.V.I.S. — Update Log & Release Notes
 
+## v2.6.0 — Dynamic Island PC Dashboard, Live Album Cover & Audio Visualizer, Local LM Studio (Qwen3 8B) & Live Hot-Reload (2026-11-22)
+
+### 1. Dynamic Island PC Home Dashboard & Live Music Visualizer (`services/desktop_overlay.py`, `tools/pc_control.py`)
+- **Idle Notch Live Album Cover & WASAPI Audio Visualizer (`212×23`):**
+  - When a song plays on Spotify or YouTube Music, the pitch-black idle notch expands horizontally (`212×23px`) to show the track's **rounded Album Cover** on the left, **`JARVIS`** in the center, and a **6-bar 30fps Live Audio Visualizer** on the right.
+  - **Real-Time Windows CoreAudio Sync (`_WindowsAudioPeakMeter`):** Reads live master audio output amplitude directly from Windows WASAPI (`IAudioMeterInformation::GetPeakValue`) via zero-dependency `ctypes` COM calls so the bars bounce to the actual beat of the song.
+  - **Blurry Album-Cover Visualizer Palette:** Fetches the track's album cover in the background (via Deezer / iTunes API), applies a Gaussian blur + saturation boost (`ImageFilter.GaussianBlur(radius=4)`), and colors the dancing visualizer bars and their soft outer glow with the blurred background colors while keeping the notch body pure black (`#07080b`).
+- **Full PC Home Dashboard (`🏠` Home Tab):**
+  - Clicking the notch (or pressing `Ctrl + /`) now opens directly to the **PC Home Dashboard**, while **JARVIS AI Chat** is tucked into its own dedicated **`✨` Sparkle Icon** in the top navigation bar.
+  - **Now Playing Media Card:** Live track title, album artwork thumbnail, and working **`⏮` (Rewind/Previous)**, **`⏯` (Play/Pause)**, and **`⏭` (Fast-Forward/Next)** transport buttons powered by `KEYEVENTF_EXTENDEDKEY` + direct `WM_APPCOMMAND` (`0x0319`) posting to background Spotify windows.
+  - **CPU & RAM Health in Words with Icons:** Zero-overhead `<0.1ms` Win32 `GetSystemTimes` and `GlobalMemoryStatusEx` cards displaying **CPU Usage** and **RAM Usage** in plain words with color-coded icons (`🟢 Low`, `🔵 Normal`, `🟠/🔴 High`).
+  - **Important Events & Schedule Card:** Combines today's Google Calendar events (refreshed in the background via Composio), upcoming reminders (`⏰`), and open/high-priority tasks (`🔥` / `📌`).
+
+### 2. Local LM Studio Engine (Qwen3 8B) & Continuous Self-Refresh Learning (`brain/gemini.py`, `tools/student.py`, `services/scheduler.py`)
+- **LM Studio (`http://127.0.0.1:1234/v1`) & Qwen3 8B Support (`lmstudio:qwen3-8b`):**
+  - Added smart tool pruning (`_select_relevant_tools_for_local`, capping schemas to `<=8` relevant tools) so local models never overflow a 4,096-token context window with all 99 tool definitions.
+  - Added automatic `/no_think` injection for Qwen3 models for instant ~25–35 tok/sec responses, automatic pure-chat retry on `400 Bad Request` tool-template errors (without retrying on timeouts), and persistent `.env` saving when switching models in the Desktop Notch or `/model`.
+- **Automatic Live Web Grounding & Casual Reading Loop:**
+  - **Pre-Flight Web Grounding (`_extract_auto_grounding_topic`):** Automatically runs a 1-second DuckDuckGo search before drafting emails or answering questions about real-world topics/games/events (such as *Grand Theft Auto VI*) so local models never rely on outdated training cutoffs.
+  - **Zero-Token Background Casual Reading (`run_casual_reading_refresh`):** Every 3 hours in the background (using 0% local LLM CPU so it never contends with live chat slots), JARVIS casually browses current world events, games, tech releases, and topics the user recently discussed, saving compact `Casual Reading` cards into its Second Brain for automatic prompt recall.
+
+### 3. Optional Voice Replies & Live Code Hot-Reload (`main.py`, `services/telegram.py`, `tools/comms.py`)
+- **Text-Only Replies by Default (`VOICE_CHAT_DEFAULT=false`):**
+  - Disabled unsolicited voice messages after every text reply; two-way voice chat is now purely optional via `/voicemode`.
+- **Live Hot-Reload File Watcher (`_start_hot_reload_watcher` in `main.py`):**
+  - Watches all project `.py` files and `.env` in a lightweight background thread, validates syntax with `py_compile`, and automatically hot-restarts JARVIS in-place whenever a feature or fix is saved (while suppressing duplicate `"Jarvis online."` Telegram startup notifications on hot-reload).
+
+---
+
 ## v2.5.0 — Dynamic Island Desktop Notch, Native Telegram VoIP Calling, Universal Composio Bridge & Autonomous Agentic Suite (2026-11-22)
 
 ### 1. Dynamic Island / Top-Notch Desktop Companion Overlay (`services/desktop_overlay.py`)

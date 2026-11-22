@@ -187,6 +187,12 @@ async def auto_study_job(context: Any) -> None:
     if not config.OWNER_ID or not config.AUTO_STUDY_ENABLED or config.is_quiet_hours():
         return
     try:
+        from brain.gemini import is_local_model
+        if is_local_model(config.LLM_MODEL):
+            # When using a local LLM in LM Studio, use 0-token casual reading refresh instead of multi-pass LLM synthesis
+            # so background learning never hogs the CPU or blocks LM Studio slots!
+            await casual_reading_job(context)
+            return
         from services.telegram import TelegramService
         from tools.base import ToolContext
         from tools.student import run_study_session
@@ -203,6 +209,27 @@ async def auto_study_job(context: Any) -> None:
             await TelegramService.send_long(context.bot, config.OWNER_ID, report)
     except Exception:
         log.warning("Background auto_study_job failed", exc_info=True)
+
+
+async def casual_reading_job(context: Any) -> None:
+    """Periodic casual reading refresh: JARVIS quietly browses a topic (like picking up a book or magazine)
+    to keep its local LLM world knowledge fresh over time without spamming the user.
+    """
+    if not config.OWNER_ID or config.is_quiet_hours():
+        return
+    try:
+        from tools.base import ToolContext
+        from tools.student import run_casual_reading_refresh
+
+        ctx = ToolContext(
+            bot=context.bot,
+            chat_id=config.OWNER_ID,
+            job_queue=getattr(context, "job_queue", None),
+            user_id=config.OWNER_ID,
+        )
+        await run_casual_reading_refresh(ctx)
+    except Exception:
+        log.debug("Background casual_reading_job skipped", exc_info=True)
 
 
 def register_jobs(app: Any) -> None:
@@ -284,3 +311,14 @@ def register_jobs(app: Any) -> None:
             "Autonomous self-study loop scheduled every %sh",
             config.AUTO_STUDY_INTERVAL_HOURS,
         )
+
+    if config.OWNER_ID:
+        # Casual reading loop: every 3 hours (and 2 minutes after startup), JARVIS quietly reads up on
+        # current world events, games, tech, and topics the user recently talked about.
+        job_queue.run_repeating(
+            casual_reading_job,
+            interval=3 * 3600,
+            first=120,
+            name="casual_reading",
+        )
+        log.info("Casual reading knowledge-refresh loop scheduled every 3h")

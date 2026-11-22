@@ -78,6 +78,11 @@ LLM_FAST_MODEL: str = env("LLM_FAST_MODEL", LLM_MODEL)
 LLM_DEEP_MODEL: str = env("LLM_DEEP_MODEL", LLM_MODEL)
 LLM_FALLBACK_MODEL: str = env("LLM_FALLBACK_MODEL", "gemini-3.5-flash-lite")
 
+# Local LLM (LM Studio default http://127.0.0.1:1234/v1; also supports Ollama/llama.cpp)
+# Prefix any model with "lmstudio:" or "local:" (e.g. LLM_MODEL=lmstudio:bonsai-27b)
+LOCAL_LLM_BASE_URL: str = env("LOCAL_LLM_BASE_URL", "http://127.0.0.1:1234/v1")
+LOCAL_LLM_API_KEY: str = env("LOCAL_LLM_API_KEY", "lm-studio")
+
 LLM_TIMEOUT_SECONDS: int = max(5, env_int("LLM_TIMEOUT_SECONDS", 30))
 # When a fallback model exists, give the primary this long before switching over.
 LLM_PRIMARY_TIMEOUT_SECONDS: int = max(3, env_int("LLM_PRIMARY_TIMEOUT_SECONDS", 12))

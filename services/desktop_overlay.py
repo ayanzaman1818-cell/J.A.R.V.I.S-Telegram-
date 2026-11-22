@@ -47,7 +47,80 @@ def _ensure_stdlib_before_pyside() -> None:
     )
 
 
-# --- Native Windows MCI Microphone Recorder & Audio Player ---
+# --- Native Windows MCI Microphone Recorder, Audio Player & WASAPI Live Audio Peak Meter ---
+
+
+class _WindowsAudioPeakMeter:
+    """Zero-dependency Win32 CoreAudio IAudioMeterInformation reader for 60fps real-time music visualizer sync."""
+
+    def __init__(self) -> None:
+        self._meter_ptr: Any = None
+        self._get_peak_fn: Any = None
+        self._initialized = False
+
+    def _ensure_init(self) -> None:
+        if self._initialized or os.name != "nt":
+            return
+        self._initialized = True
+        try:
+            import uuid
+            from ctypes import POINTER, Structure, byref, c_float, c_uint, c_void_p, HRESULT
+            from ctypes.wintypes import DWORD
+
+            class _GUID(Structure):
+                _fields_ = [
+                    ("Data1", DWORD),
+                    ("Data2", ctypes.c_ushort),
+                    ("Data3", ctypes.c_ushort),
+                    ("Data4", ctypes.c_ubyte * 8),
+                ]
+
+                def __init__(self, s: str) -> None:
+                    u = uuid.UUID(s)
+                    self.Data1 = u.time_low
+                    self.Data2 = u.time_mid
+                    self.Data3 = u.time_hi_version
+                    for i, b in enumerate(u.bytes[8:]):
+                        self.Data4[i] = b
+
+            clsid_enum = _GUID("{BCDE0395-E52F-467C-8E3D-C4579291692E}")
+            iid_enum = _GUID("{A95664D2-9614-4F35-A746-DE8DB63617E6}")
+            iid_meter = _GUID("{C02216F6-8C67-4B5B-9D00-D008E73E0064}")
+
+            ole32 = ctypes.windll.ole32
+            ole32.CoInitialize(None)
+            enum_ptr = c_void_p()
+            if ole32.CoCreateInstance(byref(clsid_enum), None, 23, byref(iid_enum), byref(enum_ptr)) != 0:
+                return
+            vt = ctypes.cast(ctypes.cast(enum_ptr, POINTER(c_void_p))[0], POINTER(c_void_p))
+            get_ep = ctypes.WINFUNCTYPE(HRESULT, c_void_p, c_uint, c_uint, POINTER(c_void_p))(vt[4])
+            dev_ptr = c_void_p()
+            if get_ep(enum_ptr, 0, 1, byref(dev_ptr)) != 0:
+                return
+            dev_vt = ctypes.cast(ctypes.cast(dev_ptr, POINTER(c_void_p))[0], POINTER(c_void_p))
+            activate = ctypes.WINFUNCTYPE(HRESULT, c_void_p, POINTER(_GUID), DWORD, c_void_p, POINTER(c_void_p))(dev_vt[3])
+            meter_ptr = c_void_p()
+            if activate(dev_ptr, byref(iid_meter), 23, None, byref(meter_ptr)) != 0:
+                return
+            meter_vt = ctypes.cast(ctypes.cast(meter_ptr, POINTER(c_void_p))[0], POINTER(c_void_p))
+            self._meter_ptr = meter_ptr
+            self._get_peak_fn = ctypes.WINFUNCTYPE(HRESULT, c_void_p, POINTER(c_float))(meter_vt[3])
+        except Exception:
+            self._meter_ptr = None
+            self._get_peak_fn = None
+
+    def get_peak(self) -> float:
+        """Return the instantaneous master audio output peak amplitude in [0.0, 1.0]."""
+        self._ensure_init()
+        if not self._get_peak_fn or not self._meter_ptr:
+            return 0.0
+        try:
+            peak = ctypes.c_float(0.0)
+            if self._get_peak_fn(self._meter_ptr, ctypes.byref(peak)) == 0:
+                return max(0.0, min(1.0, float(peak.value)))
+        except Exception:
+            pass
+        return 0.0
 
 
 class _WindowsMicRecorder:
@@ -246,6 +319,33 @@ class DesktopOverlayService:
         self._qt_app: Any = None
         self._qt_window: Any = None
 
+        # Zero-overhead Win32 CPU delta counters & cached calendar events for the PC Home Dashboard
+        self._cpu_prev_idle: int = 0
+        self._cpu_prev_kernel: int = 0
+        self._cpu_prev_user: int = 0
+        self._last_cpu_pct: float = 12.0
+        self._cal_events_cache: list[str] = []
+        self._cal_events_ts: float = 0.0
+        self._cal_fetching: bool = False
+
+        # Live Now Playing album art, blurry background palette & WASAPI audio meter for Idle Notch Visualizer
+        self._audio_meter = _WindowsAudioPeakMeter()
+        self._now_playing_state: dict[str, Any] = {
+            "playing": False,
+            "track": "No song playing right now",
+            "source": "Spotify / Media Idle",
+        }
+        self._now_playing_ts: float = 0.0
+        self._album_art_cache: dict[str, dict[str, Any]] = {}
+        self._album_fetching_track: str = ""
+        self._current_art_bytes: bytes = b""
+        self._current_art_track: str = ""
+        self._current_art_palette: list[tuple[int, int, int]] = [
+            (56, 189, 248),
+            (168, 85, 247),
+            (52, 211, 153),
+        ]
+
     def _get_async_loop(self) -> asyncio.AbstractEventLoop:
         if self._external_loop and self._external_loop.is_running():
             return self._external_loop
@@ -380,6 +480,319 @@ class DesktopOverlayService:
         # Show apps that can be connected first, followed by already-connected apps
         cards.sort(key=lambda c: 1 if c["connected"] else 0)
         return cards
+
+    def _sample_cpu_ram_fast(self) -> tuple[float, float]:
+        """Instant <0.1ms Win32 kernel32 GetSystemTimes & GlobalMemoryStatusEx check (no subprocess)."""
+        cpu_pct = self._last_cpu_pct
+        ram_pct = 45.0
+        if os.name == "nt":
+            try:
+                class _FILETIME(ctypes.Structure):
+                    _fields_ = [("dwLowDateTime", ctypes.c_ulong), ("dwHighDateTime", ctypes.c_ulong)]
+
+                idle_ft = _FILETIME()
+                kernel_ft = _FILETIME()
+                user_ft = _FILETIME()
+                if ctypes.windll.kernel32.GetSystemTimes(
+                    ctypes.byref(idle_ft), ctypes.byref(kernel_ft), ctypes.byref(user_ft)
+                ):
+                    idle = (idle_ft.dwHighDateTime << 32) | idle_ft.dwLowDateTime
+                    kernel = (kernel_ft.dwHighDateTime << 32) | kernel_ft.dwLowDateTime
+                    user = (user_ft.dwHighDateTime << 32) | user_ft.dwLowDateTime
+                    if self._cpu_prev_kernel > 0:
+                        d_idle = idle - self._cpu_prev_idle
+                        d_total = (kernel - self._cpu_prev_kernel) + (user - self._cpu_prev_user)
+                        if d_total > 0:
+                            cpu_pct = max(0.0, min(100.0, (1.0 - (d_idle / float(d_total))) * 100.0))
+                            self._last_cpu_pct = cpu_pct
+                    self._cpu_prev_idle = idle
+                    self._cpu_prev_kernel = kernel
+                    self._cpu_prev_user = user
+
+                from tools.pc_control import _MEMORYSTATUSEX
+                mem = _MEMORYSTATUSEX()
+                mem.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
+                if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(mem)):
+                    ram_pct = float(mem.dwMemoryLoad)
+            except Exception:
+                pass
+        return cpu_pct, ram_pct
+
+    def _detect_now_playing_fast(self) -> dict[str, Any]:
+        """Fast Win32 EnumWindows check for currently playing Spotify / media window title (no PowerShell spawn)."""
+        if os.name != "nt":
+            return {"playing": False, "track": "No song playing right now", "source": "Media Idle"}
+
+        spotify_titles: list[str] = []
+        browser_media_titles: list[str] = []
+        user32 = ctypes.windll.user32
+        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        cls_buf = ctypes.create_unicode_buffer(128)
+
+        def _cb(hwnd: int, _lparam: int) -> bool:
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            title = buf.value.strip()
+            if not title:
+                return True
+            user32.GetClassNameW(hwnd, cls_buf, 128)
+            cname = cls_buf.value
+            t_low = title.lower()
+            if t_low in ("spotify", "spotify free", "spotify premium"):
+                spotify_titles.append("PAUSED")
+            elif " - " in title and cname.startswith("Chrome_WidgetWin"):
+                # Exclude browsers, VS Code, Discord, etc.
+                if not any(
+                    b in t_low
+                    for b in (
+                        "google chrome",
+                        "microsoft​ edge",
+                        "microsoft edge",
+                        "mozilla firefox",
+                        "visual studio code",
+                        "antigravity",
+                        "discord",
+                        "lm studio",
+                        "telegram",
+                    )
+                ):
+                    spotify_titles.insert(0, title)
+                elif "youtube music" in t_low or " - youtube" in t_low or "soundcloud" in t_low:
+                    cleaned = (
+                        title.replace(" - YouTube Music", "")
+                        .replace(" - YouTube", "")
+                        .replace(" - Google Chrome", "")
+                        .replace(" - Microsoft Edge", "")
+                        .strip()
+                    )
+                    browser_media_titles.append(cleaned)
+            return True
+
+        try:
+            user32.EnumWindows(EnumWindowsProc(_cb), 0)
+        except Exception:
+            pass
+
+        for st in spotify_titles:
+            if st != "PAUSED":
+                res = {"playing": True, "track": st, "source": "Spotify · Playing Now"}
+                self._now_playing_state = res
+                self._now_playing_ts = time.time()
+                self._ensure_album_art_async(st)
+                return res
+        if browser_media_titles:
+            res = {"playing": True, "track": browser_media_titles[0], "source": "Web Media · Playing Now"}
+            self._now_playing_state = res
+            self._now_playing_ts = time.time()
+            self._ensure_album_art_async(browser_media_titles[0])
+            return res
+        if "PAUSED" in spotify_titles:
+            res = {"playing": False, "track": "Spotify is open (Paused)", "source": "Spotify · Paused"}
+            self._now_playing_state = res
+            self._now_playing_ts = time.time()
+            return res
+        res = {"playing": False, "track": "No song playing right now", "source": "Spotify / Media Idle"}
+        self._now_playing_state = res
+        self._now_playing_ts = time.time()
+        return res
+
+    def get_cached_now_playing(self) -> dict[str, Any]:
+        """Return cached Now Playing info, refreshing every 1.2s so 33fps idle visualizer stays zero-overhead."""
+        if time.time() - self._now_playing_ts > 1.2:
+            return self._detect_now_playing_fast()
+        return self._now_playing_state
+
+    def _ensure_album_art_async(self, track_title: str) -> None:
+        """Fetch album cover artwork and extract blurry vibrant palette colors in a background thread."""
+        clean = (track_title or "").strip()
+        if not clean or clean in ("No song playing right now", "Spotify is open (Paused)"):
+            return
+        if clean in self._album_art_cache:
+            cached = self._album_art_cache[clean]
+            self._current_art_bytes = cached.get("bytes", b"")
+            self._current_art_palette = cached.get("palette", self._current_art_palette)
+            self._current_art_track = clean
+            return
+        if self._album_fetching_track == clean:
+            return
+        self._album_fetching_track = clean
+        threading.Thread(
+            target=self._fetch_album_art_worker, args=(clean,), daemon=True
+        ).start()
+
+    def _fetch_album_art_worker(self, track_title: str) -> None:
+        """Query iTunes Search API for the playing track's album cover & extract blurred dominant RGB colors."""
+        import io
+        from urllib.parse import quote
+        import httpx
+
+        art_bytes = b""
+        palette: list[tuple[int, int, int]] = [
+            (56, 189, 248),
+            (168, 85, 247),
+            (52, 211, 153),
+        ]
+        try:
+            q = re.sub(r"\([^)]*\)|\[[^\]]*\]", "", track_title).replace(" - ", " ").strip()
+            with httpx.Client(timeout=5.0) as client:
+                # Primary: Deezer Search API (instant, high-res 250x250 cover art)
+                r_dz = client.get(f"https://api.deezer.com/search?q={quote(q)}&limit=1")
+                if r_dz.status_code == 200:
+                    dz_data = (r_dz.json() or {}).get("data") or []
+                    if dz_data:
+                        album_obj = dz_data[0].get("album") or {}
+                        art_url = str(album_obj.get("cover_medium") or album_obj.get("cover") or "")
+                        if art_url:
+                            art_res = client.get(art_url)
+                            if art_res.status_code == 200:
+                                art_bytes = art_res.content
+
+                # Fallback: iTunes Search API
+                if not art_bytes:
+                    r_it = client.get(f"https://itunes.apple.com/search?term={quote(q)}&media=music&limit=1")
+                    if r_it.status_code == 200:
+                        results = (r_it.json() or {}).get("results") or []
+                        if results:
+                            art_url = str(results[0].get("artworkUrl100") or "")
+                            if art_url:
+                                art_res = client.get(art_url)
+                                if art_res.status_code == 200:
+                                    art_bytes = art_res.content
+        except Exception:
+            pass
+
+        if art_bytes:
+            try:
+                from PIL import Image, ImageEnhance, ImageFilter
+
+                img = Image.open(io.BytesIO(art_bytes)).convert("RGB")
+                # Create a heavily blurred version of the album cover background and boost its saturation
+                blurred = img.resize((24, 24)).filter(ImageFilter.GaussianBlur(radius=4))
+                blurred = ImageEnhance.Color(blurred).enhance(1.65)
+                blurred = ImageEnhance.Brightness(blurred).enhance(1.20)
+                w, h = blurred.size
+                sample_pts = [
+                    (w // 4, h // 3),
+                    (w // 2, h // 2),
+                    (3 * w // 4, 2 * h // 3),
+                    (w // 3, 2 * h // 3),
+                ]
+                extracted: list[tuple[int, int, int]] = []
+                for sx, sy in sample_pts:
+                    r_c, g_c, b_c = blurred.getpixel((sx, sy))
+                    # Ensure enough brightness so visualizer bars glow against the dark notch
+                    if max(r_c, g_c, b_c) < 110:
+                        r_c = min(255, int(r_c * 1.6 + 55))
+                        g_c = min(255, int(g_c * 1.6 + 55))
+                        b_c = min(255, int(b_c * 1.6 + 55))
+                    extracted.append((r_c, g_c, b_c))
+                if len(extracted) >= 3:
+                    palette = extracted
+            except Exception:
+                pass
+
+        self._album_art_cache[track_title] = {
+            "bytes": art_bytes,
+            "palette": palette,
+        }
+        self._current_art_bytes = art_bytes
+        self._current_art_palette = palette
+        self._current_art_track = track_title
+        if self._album_fetching_track == track_title:
+            self._album_fetching_track = ""
+
+    def _refresh_calendar_events_bg(self) -> None:
+        """Background thread to refresh today's Google Calendar events via Composio every 3 minutes."""
+        if self._cal_fetching:
+            return
+        self._cal_fetching = True
+        try:
+            from tools import integrations as integ
+            if not integ.composio_enabled():
+                return
+            loop = self._get_async_loop()
+            ctx = self._make_context()
+            fut = asyncio.run_coroutine_threadsafe(integ.calendar_today(ctx), loop)
+            raw = fut.result(timeout=12.0)
+            parsed_events: list[str] = []
+            # Parse summary lines or JSON from Composio calendar output
+            for m in re.finditer(r'"summary"\s*:\s*"([^"]+)"', raw or ""):
+                s = m.group(1).strip()
+                if s and s not in parsed_events:
+                    parsed_events.append(f"📅 Today: {s}")
+            self._cal_events_cache = parsed_events[:3]
+            self._cal_events_ts = time.time()
+        except Exception:
+            self._cal_events_ts = time.time()
+        finally:
+            self._cal_fetching = False
+
+    def fetch_dashboard_snapshot(self) -> dict[str, Any]:
+        """Collect live PC Dashboard data (Now Playing song, CPU/RAM in words with icons, and Important Events)."""
+        media = self._detect_now_playing_fast()
+        cpu_pct, ram_pct = self._sample_cpu_ram_fast()
+
+        if cpu_pct < 35.0:
+            cpu_word, cpu_icon, cpu_color = "Low", "🟢", "#34d399"
+        elif cpu_pct < 75.0:
+            cpu_word, cpu_icon, cpu_color = "Normal", "🔵", "#38bdf8"
+        else:
+            cpu_word, cpu_icon, cpu_color = "High", "🔴", "#f87171"
+
+        if ram_pct < 50.0:
+            ram_word, ram_icon, ram_color = "Low", "🟢", "#34d399"
+        elif ram_pct < 80.0:
+            ram_word, ram_icon, ram_color = "Normal", "🔵", "#38bdf8"
+        else:
+            ram_word, ram_icon, ram_color = "High", "🟠", "#fb923c"
+
+        # Important Events: Upcoming Reminders + High/Open Tasks + Cached Google Calendar Events
+        events: list[str] = []
+        if time.time() - self._cal_events_ts > 180.0 and not self._cal_fetching:
+            threading.Thread(target=self._refresh_calendar_events_bg, daemon=True).start()
+        events.extend(self._cal_events_cache[:2])
+
+        try:
+            rems = db.upcoming_reminders(limit=4, user_id=self.owner_id)
+            for r in rems:
+                msg = str(r.get("message") or "").strip()
+                if msg.startswith("[AGENT]"):
+                    continue
+                due = str(r.get("due_at") or "")[11:16] or str(r.get("due_at") or "")[:10]
+                events.append(f"⏰ {due} — {msg[:46]}")
+                if len(events) >= 3:
+                    break
+        except Exception:
+            pass
+
+        if len(events) < 3:
+            try:
+                tasks = db.list_tasks(status="open", limit=4, user_id=self.owner_id)
+                for t in tasks:
+                    prio = str(t.get("priority", "normal")).lower()
+                    icon = "🔥" if prio == "high" else "📌"
+                    due_s = f" (due {str(t['due_at'])[:10]})" if t.get("due_at") else ""
+                    events.append(f"{icon} {t['title'][:44]}{due_s}")
+                    if len(events) >= 3:
+                        break
+            except Exception:
+                pass
+
+        return {
+            "media": media,
+            "cpu_word": cpu_word,
+            "cpu_icon": cpu_icon,
+            "cpu_color": cpu_color,
+            "ram_word": ram_word,
+            "ram_icon": ram_icon,
+            "ram_color": ram_color,
+            "events": events[:3],
+        }
 
     def fetch_live_suggestions(self) -> list[dict[str, str]]:
         """Build live contextual suggestion cards, excluding any that the user has already completed."""
@@ -629,10 +1042,12 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
         QColor,
         QCursor,
         QFont,
+        QImage,
         QLinearGradient,
         QPainter,
         QPainterPath,
         QPen,
+        QPixmap,
         QPolygonF,
         QRadialGradient,
         QRegion,
@@ -1068,12 +1483,15 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
         # Target visual notch dimensions (width, height) inside the fixed 580x540 canvas
         SIZES: dict[str, tuple[int, int]] = {
-            "idle": (96, 7),           # Compact micro-strip at top center
-            "hover": (162, 20),        # Slightly larger hovered pill with status dot + JARVIS text
-            "suggestions": (468, 516), # Image 3: Suggestions card
-            "chat": (536, 336),        # Image 4: Quick Chat card
-            "chat_active": (536, 468), # Quick Chat card with active conversation
-            "voice": (448, 276),       # Image 5: Voice Cloud Orb card
+            "idle": (96, 7),           # Compact micro-strip at top center when no music is playing
+            "idle_music": (212, 23),   # Sleek horizontal music strip: wide horizontally, slight vertical height for album cover + visualizer
+            "hover": (176, 20),        # Slightly larger hovered pill with status dot + JARVIS text
+            "hover_music": (248, 25),  # Hovered horizontal music strip
+            "dashboard": (536, 430),   # Home PC Dashboard (Now Playing, CPU/RAM in words, Important Events)
+            "suggestions": (468, 516), # Connections hub card
+            "chat": (536, 336),        # JARVIS Quick Chat card
+            "chat_active": (536, 468), # JARVIS Quick Chat card with active conversation
+            "voice": (448, 276),       # Voice Cloud Orb card
         }
         EAR_RADIUS = 16
 
@@ -1115,6 +1533,16 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._build_ui()
             self._update_notch_frame(self._notch_w, self._notch_h)
 
+            # Live 33fps Music Visualizer & Album Cover state for the Idle Dynamic Notch
+            self._music_playing_active: bool = False
+            self._vis_bars: list[float] = [0.22, 0.35, 0.50, 0.38, 0.28, 0.42]
+            self._vis_phase: float = 0.0
+            self._art_pixmap: QPixmap | None = None
+            self._art_pixmap_track: str = ""
+            self._vis_timer = QTimer(self)
+            self._vis_timer.timeout.connect(self._on_visualizer_tick)
+            self._vis_timer.start(32)
+
             self.hotkey_triggered.connect(self._on_hotkey_toggle)
             self.reply_ready.connect(self._on_reply_ready)
             self.composio_link_ready.connect(self._on_composio_link_ready)
@@ -1144,7 +1572,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
             if not just_clicked:
                 return
-            if self.pinned or self.state not in ("suggestions", "chat", "voice"):
+            if self.pinned or self.state not in ("dashboard", "suggestions", "chat", "voice"):
                 return
 
             # Check if the global cursor position is outside the current visible notch rectangle
@@ -1207,14 +1635,82 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._opacity_effect.setOpacity(t)
             self._update_notch_frame(self._notch_w, self._notch_h)
 
+        def _on_visualizer_tick(self) -> None:
+            """30fps tick that syncs the Dynamic Island idle visualizer with real Windows audio output & album cover."""
+            media = self.service.get_cached_now_playing()
+            is_playing = bool(media.get("playing"))
+
+            # Refresh cached QPixmap when album art bytes arrive for the active track
+            cur_bytes = self.service._current_art_bytes
+            cur_track = self.service._current_art_track
+            if cur_bytes and cur_track != self._art_pixmap_track:
+                img = QImage.fromData(cur_bytes)
+                if not img.isNull():
+                    self._art_pixmap = QPixmap.fromImage(img)
+                    self._art_pixmap_track = cur_track
+            elif not is_playing:
+                self._art_pixmap = None
+                self._art_pixmap_track = ""
+
+            # Automatically morph the idle/hover notch size when music starts or stops
+            if is_playing != self._music_playing_active:
+                self._music_playing_active = is_playing
+                if self.state in ("idle", "hover"):
+                    self._animate_to(self.state, duration_ms=460)
+
+            if not is_playing:
+                return
+
+            # Sample live Windows WASAPI master audio peak (0.0 .. 1.0) with balanced, natural responsiveness
+            raw_peak = self.service._audio_meter.get_peak()
+            prev_peak = getattr(self, "_prev_raw_peak", 0.0)
+            self._prev_raw_peak = raw_peak
+
+            # Gentle adaptive normalization so quiet and loud songs both sit in a natural middle range
+            run_max = getattr(self, "_vis_running_max", 0.22)
+            if raw_peak > run_max:
+                run_max = run_max * 0.65 + raw_peak * 0.35
+            else:
+                run_max = max(0.08, run_max * 0.992)
+            self._vis_running_max = run_max
+
+            norm_peak = min(1.0, raw_peak / max(0.08, run_max))
+            beat_delta = max(0.0, (raw_peak - prev_peak) / max(0.08, run_max))
+            self._vis_phase += 0.22 + norm_peak * 0.28 + beat_delta * 0.35
+
+            # Balanced energy: responsive to the beat without pegging at the top ceiling
+            energy = min(0.92, max(0.22, math.pow(norm_peak, 0.72) * 0.85 + beat_delta * 0.55))
+            freq_weights = (0.78, 1.05, 0.90, 1.10, 0.86, 0.72)
+            phase_offsets = (0.0, 1.2, 2.5, 0.8, 2.0, 3.3)
+
+            for i in range(len(self._vis_bars)):
+                wave = 0.28 + 0.72 * abs(math.sin(self._vis_phase * (0.95 + i * 0.16) + phase_offsets[i]))
+                target = max(0.15, min(0.95, energy * freq_weights[i] * wave))
+                prev = self._vis_bars[i]
+                # Smooth, fluid attack and decay
+                if target > prev:
+                    self._vis_bars[i] = prev * 0.42 + target * 0.58
+                else:
+                    self._vis_bars[i] = prev * 0.68 + target * 0.32
+
+            if self.state in ("idle", "hover"):
+                self.update()
+
         def _animate_to(self, new_state: str, duration_ms: int = 540) -> None:
             prev_state = self.state
             self.state = new_state
-            key = "chat_active" if (new_state == "chat" and self._has_messages) else new_state
+            if new_state == "chat" and self._has_messages:
+                key = "chat_active"
+            elif new_state == "idle" and getattr(self, "_music_playing_active", False):
+                key = "idle_music"
+            elif new_state == "hover" and getattr(self, "_music_playing_active", False):
+                key = "hover_music"
+            else:
+                key = new_state
             tw, th = self.SIZES.get(key, self.SIZES["idle"])
 
-            is_expanding = new_state in ("suggestions", "chat", "voice")
-            was_expanded = prev_state in ("suggestions", "chat", "voice")
+            is_expanding = new_state in ("dashboard", "suggestions", "chat", "voice")
+            was_expanded = prev_state in ("dashboard", "suggestions", "chat", "voice")
 
             self._fade_anim.stop()
             if not is_expanding:
@@ -1248,7 +1744,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._update_notch_frame(float(val.width()), float(val.height()))
 
         def _on_anim_finished(self) -> None:
-            if self.state in ("suggestions", "chat", "voice"):
+            if self.state in ("dashboard", "suggestions", "chat", "voice"):
                 self._opacity_effect.setOpacity(1.0)
                 self._content_root.show()
                 if self.state == "chat":
@@ -1258,13 +1754,16 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._content_root.hide()
 
         def _switch_stack_page(self, mode: str) -> None:
-            if mode == "suggestions":
-                self._refresh_suggestions()
+            if mode == "dashboard":
+                self._refresh_dashboard()
                 self._stack.setCurrentIndex(0)
-            elif mode == "chat":
+            elif mode == "suggestions":
+                self._refresh_suggestions()
                 self._stack.setCurrentIndex(1)
-            elif mode == "voice":
+            elif mode == "chat":
                 self._stack.setCurrentIndex(2)
+            elif mode == "voice":
+                self._stack.setCurrentIndex(3)
             self._content_root.show()
 
         # --- Hover & Click Events on the Notch ---
@@ -1281,8 +1780,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
         def mousePressEvent(self, event: Any) -> None:
             if event.button() == Qt.MouseButton.LeftButton and self.state in ("idle", "hover"):
-                # Open directly to the clean Quick Chat home view (Suggestions are stored in the ✨ Sparkles icon)
-                self._animate_to("chat", duration_ms=560)
+                # Open directly to the PC Home Dashboard (JARVIS Chat is tucked into its own ✨ icon)
+                self._animate_to("dashboard", duration_ms=560)
                 return
             super().mousePressEvent(event)
 
@@ -1294,8 +1793,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 return
             super().keyPressEvent(event)
 
-        def _on_hotkey_toggle(self, target_mode: str = "chat") -> None:
-            mode = (target_mode or "chat").strip().lower()
+        def _on_hotkey_toggle(self, target_mode: str = "dashboard") -> None:
+            mode = (target_mode or "dashboard").strip().lower()
             if mode == "voice":
                 # Ctrl+Alt+Space: Open directly into Voice Cloud Orb Mode (or collapse if already in Voice Mode)
                 if self.state == "voice":
@@ -1308,14 +1807,14 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     self._enter_voice_mode()
                 return
 
-            # Ctrl+/: Open directly into Quick Chat Mode (or collapse if already in Chat Mode)
-            if self.state == "chat":
+            # Ctrl+/: Open directly into PC Home Dashboard (or collapse if already open)
+            if self.state in ("dashboard", "chat", "suggestions"):
                 self._animate_to("idle", duration_ms=460)
             else:
                 if self.service._mic.is_recording:
                     self.service._mic.stop()
                 self._orb.active_pulse = False
-                self._animate_to("chat", duration_ms=520)
+                self._animate_to("dashboard", duration_ms=520)
 
         # --- Center-Locked Dynamic Island Silhouette Painting ---
 
@@ -1361,11 +1860,89 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 p.setPen(QPen(QColor(255, 255, 255, 28), 1.1))
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawPath(path)
-            elif self.state == "hover" or nh > 11:
+            elif self.state in ("idle", "hover") and getattr(self, "_music_playing_active", False) and nh >= 13:
+                # --- Sleek Horizontal Dynamic Island Music Strip (Pitch-Black Notch + Album Cover + Blurry Background-Colored Visualizer) ---
+                p.save()
+                p.setClipPath(path)
+
+                palette = self.service._current_art_palette or [
+                    (56, 189, 248),
+                    (168, 85, 247),
+                    (52, 211, 153),
+                ]
+                c0 = QColor(*palette[0])
+                c1 = QColor(*palette[1 % len(palette)])
+                c2 = QColor(*palette[2 % len(palette)])
+
+                # 1. Left Side: Compact Rounded Album Cover Artwork Thumbnail inside the pure black notch
+                art_size = max(13.0, min(18.0, nh - 5.0))
+                art_x = left + 9.0
+                art_y = (nh - art_size) / 2.0
+                art_rect = QRectF(art_x, art_y, art_size, art_size)
+
+                art_clip = QPainterPath()
+                art_clip.addRoundedRect(art_rect, 4.2, 4.2)
+                p.save()
+                p.setClipPath(art_clip)
+                if self._art_pixmap is not None and not self._art_pixmap.isNull():
+                    p.drawPixmap(art_rect.toRect(), self._art_pixmap)
+                else:
+                    disc_g = QLinearGradient(art_x, art_y, art_x + art_size, art_y + art_size)
+                    disc_g.setColorAt(0.0, c0)
+                    disc_g.setColorAt(1.0, c1)
+                    p.setBrush(QBrush(disc_g))
+                    p.drawRect(art_rect)
+                p.restore()
+
+                p.setPen(QPen(QColor(255, 255, 255, 50), 0.7))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRoundedRect(art_rect, 4.2, 4.2)
+
+                # 2. Center: Crisp "JARVIS" label in the middle between the Album Cover and Visualizer
+                p.setPen(QColor(226, 232, 240, 215))
+                font = QFont("Segoe UI", 8, QFont.Weight.Bold)
+                font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.8)
+                p.setFont(font)
+                p.drawText(QRectF(left, 0.0, nw, nh), Qt.AlignmentFlag.AlignCenter, "JARVIS")
+
+                # 3. Right Side: Live Audio Visualizer (colored with the blurry album background palette on the pure black notch)
+                bars = self._vis_bars
+                bar_w = 2.6
+                gap = 2.1
+                vis_total_w = len(bars) * bar_w + (len(bars) - 1) * gap
+                vis_right_pad = 10.0
+                vis_start_x = right - vis_right_pad - vis_total_w
+
+                max_bar_h = max(10.0, nh - 6.0)
+                cy_vis = nh / 2.0
+
+                bar_grad = QLinearGradient(vis_start_x, cy_vis - max_bar_h / 2.0, vis_start_x + vis_total_w, cy_vis + max_bar_h / 2.0)
+                bar_grad.setColorAt(0.0, c0)
+                bar_grad.setColorAt(0.5, c1)
+                bar_grad.setColorAt(1.0, c2)
+
+                p.setPen(Qt.PenStyle.NoPen)
+                for i, amp in enumerate(bars):
+                    bx = vis_start_x + i * (bar_w + gap)
+                    bh = max(2.2, min(max_bar_h, amp * max_bar_h))
+                    by = cy_vis - bh / 2.0
+                    # Soft blurry colour halo directly around each visualizer bar
+                    glow_col = QColor(palette[i % len(palette)][0], palette[i % len(palette)][1], palette[i % len(palette)][2], 85)
+                    p.setBrush(glow_col)
+                    p.drawRoundedRect(QRectF(bx - 1.0, by - 1.0, bar_w + 2.0, bh + 2.0), 1.9, 1.9)
+                    # Crisp inner bar
+                    p.setBrush(QBrush(bar_grad))
+                    p.drawRoundedRect(QRectF(bx, by, bar_w, bh), 1.3, 1.3)
+
+                p.restore()
+                p.setPen(QPen(QColor(255, 255, 255, 28), 0.9))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawPath(path)
+            elif self.state == "hover":
                 p.setPen(QPen(QColor(255, 255, 255, 36), 1.0))
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawPath(path)
-                # Glowing emerald status dot + crisp 'JARVIS' micro-label inside hovered pill
+                # Glowing emerald status dot + crisp 'JARVIS' micro-label ONLY when actively hovering the notch
                 if nh >= 15:
                     p.setPen(Qt.PenStyle.NoPen)
                     p.setBrush(QColor("#34d399"))
@@ -1393,12 +1970,281 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             root_layout.setSpacing(0)
 
             self._stack = QStackedWidget(self._content_root)
+            self._stack.addWidget(self._build_dashboard_page())
             self._stack.addWidget(self._build_suggestions_page())
             self._stack.addWidget(self._build_chat_page())
             self._stack.addWidget(self._build_voice_page())
 
             root_layout.addWidget(self._stack)
             self._content_root.hide()
+
+            # Auto-refresh dashboard every 2.5 seconds while visible
+            self._dash_timer = QTimer(self)
+            self._dash_timer.timeout.connect(self._on_dash_timer_tick)
+            self._dash_timer.start(2500)
+
+        def _on_dash_timer_tick(self) -> None:
+            if self.state == "dashboard" and self.isVisible():
+                self._refresh_dashboard()
+
+        def _build_dashboard_page(self) -> QWidget:
+            """PC Home Dashboard: Now Playing Song + CPU/RAM Health IN WORDS with icons + Important Events."""
+            page = QWidget()
+            layout = QVBoxLayout(page)
+            layout.setContentsMargins(6, 2, 6, 6)
+            layout.setSpacing(10)
+
+            # Top Navigation Bar: [Home (Active)] [JARVIS Icon] [Connections Icon]  ---  [Time/Date]  ---  [Voice] [Pin] [Close]
+            top = QHBoxLayout()
+            top.setSpacing(6)
+            btn_home = _VectorIconButton("home", "PC Dashboard Home")
+            btn_home.active_state = True
+            btn_jarvis = _VectorIconButton("chat", "Open JARVIS AI Chat")
+            btn_jarvis.clicked.connect(lambda: self._animate_to("chat", duration_ms=460))
+            btn_conn = _VectorIconButton(
+                "connections",
+                "Composio App Connections Hub",
+                badge_count=0,
+            )
+            btn_conn.clicked.connect(lambda: self._animate_to("suggestions", duration_ms=460))
+
+            self._dash_clock_lbl = QLabel("PC Dashboard")
+            self._dash_clock_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._dash_clock_lbl.setStyleSheet(
+                "color: #e2e8f0; font-size: 12px; font-weight: 800; "
+                "background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); "
+                "border-radius: 10px; padding: 4px 12px;"
+            )
+
+            btn_wave = _VectorIconButton("waveform", "Voice Orb Mode")
+            btn_wave.clicked.connect(self._enter_voice_mode)
+            self._pin_btn_dash = _VectorIconButton("pin", "Pin Overlay Open")
+            self._pin_btn_dash.clicked.connect(self._toggle_pin)
+            btn_collapse = _VectorIconButton("close", "Collapse to Top Notch (Esc)")
+            btn_collapse.clicked.connect(lambda: self._animate_to("idle", duration_ms=460))
+
+            top.addWidget(btn_home)
+            top.addWidget(btn_jarvis)
+            top.addWidget(btn_conn)
+            top.addStretch(1)
+            top.addWidget(self._dash_clock_lbl)
+            top.addStretch(1)
+            top.addWidget(btn_wave)
+            top.addWidget(self._pin_btn_dash)
+            top.addWidget(btn_collapse)
+            layout.addLayout(top)
+
+            # 1. NOW PLAYING MEDIA CARD
+            media_card = QFrame()
+            media_card.setFixedHeight(78)
+            media_card.setStyleSheet(
+                "QFrame { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, "
+                "stop:0 rgba(16, 185, 129, 0.14), stop:1 rgba(15, 23, 42, 0.72)); "
+                "border: 1px solid rgba(52, 211, 153, 0.32); border-radius: 16px; }"
+            )
+            ml = QHBoxLayout(media_card)
+            ml.setContentsMargins(14, 10, 14, 10)
+            ml.setSpacing(12)
+
+            self._dash_music_icon = QLabel("🎵")
+            self._dash_music_icon.setFixedSize(44, 44)
+            self._dash_music_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._dash_music_icon.setStyleSheet(
+                "background: rgba(16, 185, 129, 0.22); border: 1px solid rgba(52, 211, 153, 0.45); "
+                "border-radius: 12px; font-size: 20px;"
+            )
+            ml.addWidget(self._dash_music_icon)
+
+            m_text_col = QVBoxLayout()
+            m_text_col.setSpacing(2)
+            self._dash_media_source = QLabel("NOW PLAYING")
+            self._dash_media_source.setStyleSheet(
+                "color: #6ee7b7; font-size: 10.5px; font-weight: 800; letter-spacing: 0.8px; border: none; background: transparent;"
+            )
+            self._dash_media_track = QLabel("No song playing right now")
+            self._dash_media_track.setStyleSheet(
+                "color: #ffffff; font-size: 14px; font-weight: 800; border: none; background: transparent;"
+            )
+            m_text_col.addWidget(self._dash_media_source)
+            m_text_col.addWidget(self._dash_media_track)
+            ml.addLayout(m_text_col, stretch=1)
+
+            # Media transport controls (Prev / Play-Pause / Next)
+            ctrl_row = QHBoxLayout()
+            ctrl_row.setSpacing(5)
+            for sym, act, tip in (("⏮", "prev_track", "Previous / Rewind Track"), ("⏯", "play_pause", "Play / Pause"), ("⏭", "next_track", "Next / Fast-Forward Track")):
+                b = QPushButton(sym)
+                b.setFixedSize(30, 30)
+                b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+                b.setToolTip(tip)
+                b.setStyleSheet(
+                    "QPushButton { background: rgba(255,255,255,0.09); color: #ffffff; "
+                    "border: 1px solid rgba(255,255,255,0.16); border-radius: 10px; font-size: 13px; }"
+                    "QPushButton:hover { background: rgba(52, 211, 153, 0.28); border: 1px solid #34d399; }"
+                )
+                b.clicked.connect(lambda _c=False, a=act: self._on_dash_media_control(a))
+                ctrl_row.addWidget(b)
+            ml.addLayout(ctrl_row)
+            layout.addWidget(media_card)
+
+            # 2. SYSTEM HEALTH ROW (CPU USAGE & RAM USAGE IN WORDS WITH ICONS)
+            health_row = QHBoxLayout()
+            health_row.setSpacing(10)
+
+            self._cpu_card = QFrame()
+            self._cpu_card.setFixedHeight(80)
+            self._cpu_card.setStyleSheet(
+                "QFrame { background: rgba(255, 255, 255, 0.045); "
+                "border: 1px solid rgba(255, 255, 255, 0.11); border-radius: 16px; }"
+            )
+            cl = QHBoxLayout(self._cpu_card)
+            cl.setContentsMargins(14, 10, 14, 10)
+            cl.setSpacing(10)
+            cpu_icon_lbl = QLabel("⚡")
+            cpu_icon_lbl.setFixedSize(40, 40)
+            cpu_icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cpu_icon_lbl.setStyleSheet(
+                "background: rgba(56, 189, 248, 0.16); border: 1px solid rgba(56, 189, 248, 0.35); "
+                "border-radius: 12px; font-size: 19px;"
+            )
+            cl.addWidget(cpu_icon_lbl)
+            cpu_col = QVBoxLayout()
+            cpu_col.setSpacing(2)
+            cpu_hdr = QLabel("CPU USAGE")
+            cpu_hdr.setStyleSheet("color: #94a3b8; font-size: 10.5px; font-weight: 800; border: none; background: transparent;")
+            self._dash_cpu_word = QLabel("🟢 Low")
+            self._dash_cpu_word.setStyleSheet("color: #34d399; font-size: 17px; font-weight: 800; border: none; background: transparent;")
+            cpu_col.addWidget(cpu_hdr)
+            cpu_col.addWidget(self._dash_cpu_word)
+            cl.addLayout(cpu_col, stretch=1)
+
+            self._ram_card = QFrame()
+            self._ram_card.setFixedHeight(80)
+            self._ram_card.setStyleSheet(
+                "QFrame { background: rgba(255, 255, 255, 0.045); "
+                "border: 1px solid rgba(255, 255, 255, 0.11); border-radius: 16px; }"
+            )
+            rl = QHBoxLayout(self._ram_card)
+            rl.setContentsMargins(14, 10, 14, 10)
+            rl.setSpacing(10)
+            ram_icon_lbl = QLabel("🧠")
+            ram_icon_lbl.setFixedSize(40, 40)
+            ram_icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            ram_icon_lbl.setStyleSheet(
+                "background: rgba(168, 85, 247, 0.16); border: 1px solid rgba(168, 85, 247, 0.35); "
+                "border-radius: 12px; font-size: 19px;"
+            )
+            rl.addWidget(ram_icon_lbl)
+            ram_col = QVBoxLayout()
+            ram_col.setSpacing(2)
+            ram_hdr = QLabel("RAM USAGE")
+            ram_hdr.setStyleSheet("color: #94a3b8; font-size: 10.5px; font-weight: 800; border: none; background: transparent;")
+            self._dash_ram_word = QLabel("🔵 Normal")
+            self._dash_ram_word.setStyleSheet("color: #38bdf8; font-size: 17px; font-weight: 800; border: none; background: transparent;")
+            ram_col.addWidget(ram_hdr)
+            ram_col.addWidget(self._dash_ram_word)
+            rl.addLayout(ram_col, stretch=1)
+
+            health_row.addWidget(self._cpu_card, stretch=1)
+            health_row.addWidget(self._ram_card, stretch=1)
+            layout.addLayout(health_row)
+
+            # 3. IMPORTANT EVENTS CARD (Calendar + Reminders + Priority Tasks)
+            events_card = QFrame()
+            events_card.setStyleSheet(
+                "QFrame { background: rgba(255, 255, 255, 0.04); "
+                "border: 1px solid rgba(255, 255, 255, 0.10); border-radius: 16px; }"
+            )
+            el = QVBoxLayout(events_card)
+            el.setContentsMargins(14, 10, 14, 10)
+            el.setSpacing(6)
+
+            ev_hdr_row = QHBoxLayout()
+            ev_title = QLabel("📅  IMPORTANT EVENTS & SCHEDULE")
+            ev_title.setStyleSheet(
+                "color: #93c5fd; font-size: 11px; font-weight: 800; letter-spacing: 0.6px; border: none; background: transparent;"
+            )
+            ev_hdr_row.addWidget(ev_title)
+            ev_hdr_row.addStretch(1)
+            el.addLayout(ev_hdr_row)
+
+            self._dash_event_labels: list[QLabel] = []
+            for _ in range(3):
+                lbl = QLabel("")
+                lbl.setWordWrap(False)
+                lbl.setStyleSheet(
+                    "color: #f1f5f9; font-size: 13px; font-weight: 600; padding: 3px 0; border: none; background: transparent;"
+                )
+                el.addWidget(lbl)
+                self._dash_event_labels.append(lbl)
+
+            layout.addWidget(events_card, stretch=1)
+            return page
+
+        def _on_dash_media_control(self, action: str) -> None:
+            """Send Windows hardware media key + WM_APPCOMMAND (play_pause, next_track, prev_track) from the Dashboard Now Playing card."""
+            def _run() -> None:
+                try:
+                    from tools.pc_control import send_media_transport_command
+                    send_media_transport_command(action)
+                    time.sleep(0.35)
+                except Exception:
+                    pass
+            threading.Thread(target=_run, daemon=True).start()
+            QTimer.singleShot(420, self._refresh_dashboard)
+
+        def _refresh_dashboard(self) -> None:
+            """Update the PC Home Dashboard labels with live Now Playing song, CPU/RAM in words, and Important Events."""
+            now_str = datetime.now(config.get_zoneinfo()).strftime("%a %d %b  ·  %I:%M %p")
+            self._dash_clock_lbl.setText(now_str)
+
+            snap = self.service.fetch_dashboard_snapshot()
+            media = snap["media"]
+            track_str = str(media.get("track") or "No song playing right now")
+            if len(track_str) > 42:
+                track_str = track_str[:40] + "…"
+            self._dash_media_track.setText(track_str)
+            self._dash_media_source.setText(str(media.get("source") or "NOW PLAYING").upper())
+            if self._art_pixmap is not None and not self._art_pixmap.isNull():
+                scaled_art = self._art_pixmap.scaled(
+                    38,
+                    38,
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                self._dash_music_icon.setPixmap(scaled_art)
+            else:
+                self._dash_music_icon.setPixmap(QPixmap())
+                self._dash_music_icon.setText("🎧" if media.get("playing") else "🎵")
+
+            self._dash_cpu_word.setText(f"{snap['cpu_icon']}  {snap['cpu_word']}")
+            self._dash_cpu_word.setStyleSheet(
+                f"color: {snap['cpu_color']}; font-size: 17px; font-weight: 800; border: none; background: transparent;"
+            )
+            self._dash_ram_word.setText(f"{snap['ram_icon']}  {snap['ram_word']}")
+            self._dash_ram_word.setStyleSheet(
+                f"color: {snap['ram_color']}; font-size: 17px; font-weight: 800; border: none; background: transparent;"
+            )
+
+            events = snap.get("events") or []
+            if not events:
+                self._dash_event_labels[0].setText("✨ No urgent events or reminders right now")
+                self._dash_event_labels[0].setStyleSheet(
+                    "color: #94a3b8; font-size: 13px; font-weight: 600; padding: 3px 0; border: none; background: transparent;"
+                )
+                self._dash_event_labels[0].show()
+                for lbl in self._dash_event_labels[1:]:
+                    lbl.hide()
+            else:
+                for idx, lbl in enumerate(self._dash_event_labels):
+                    if idx < len(events):
+                        lbl.setText(events[idx])
+                        lbl.setStyleSheet(
+                            "color: #f1f5f9; font-size: 13px; font-weight: 600; padding: 3px 0; border: none; background: transparent;"
+                        )
+                        lbl.show()
+                    else:
+                        lbl.hide()
 
         def _build_suggestions_page(self) -> QWidget:
             page = QWidget()
@@ -1411,16 +2257,19 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
             left_nav = QHBoxLayout()
             left_nav.setSpacing(6)
-            btn_home = _VectorIconButton("home", "Back to Quick Chat Home")
-            btn_home.clicked.connect(lambda: self._animate_to("chat", duration_ms=480))
+            btn_home = _VectorIconButton("home", "Back to PC Home Dashboard")
+            btn_home.clicked.connect(lambda: self._animate_to("dashboard", duration_ms=480))
+            btn_jarvis_sugg = _VectorIconButton("chat", "Open JARVIS AI Chat")
+            btn_jarvis_sugg.clicked.connect(lambda: self._animate_to("chat", duration_ms=480))
             self._sugg_nav_btn_page0 = _VectorIconButton(
                 "connections",
                 "Composio Universal Connections Hub (1-click connect apps without .env edits)",
                 badge_count=0,
             )
             self._sugg_nav_btn_page0.active_state = True
-            self._sugg_nav_btn_page0.clicked.connect(lambda: self._animate_to("chat", duration_ms=480))
+            self._sugg_nav_btn_page0.clicked.connect(lambda: self._animate_to("dashboard", duration_ms=480))
             left_nav.addWidget(btn_home)
+            left_nav.addWidget(btn_jarvis_sugg)
             left_nav.addWidget(self._sugg_nav_btn_page0)
 
             center_col = QVBoxLayout()
@@ -1507,14 +2356,14 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._sugg_scroll.setWidget(self._sugg_container)
             layout.addWidget(self._sugg_scroll, stretch=1)
 
-            self._sugg_footer_btn = QPushButton("Back to Quick Chat")
+            self._sugg_footer_btn = QPushButton("Back to PC Dashboard")
             self._sugg_footer_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             self._sugg_footer_btn.setStyleSheet(
                 "QPushButton { background: transparent; color: #94a3b8; border: none; "
                 "font-size: 12px; font-weight: 600; padding: 3px; }"
                 "QPushButton:hover { color: #38bdf8; }"
             )
-            self._sugg_footer_btn.clicked.connect(lambda: self._animate_to("chat", duration_ms=360))
+            self._sugg_footer_btn.clicked.connect(lambda: self._animate_to("dashboard", duration_ms=360))
             layout.addWidget(self._sugg_footer_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
             return page
 
@@ -1526,7 +2375,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     item.widget().deleteLater()
 
             self._sugg_heading.setText("Connections")
-            self._sugg_footer_btn.setText("Back to Quick Chat")
+            self._sugg_footer_btn.setText("Back to PC Dashboard")
             self._populate_composio_connections_hub()
 
         def _populate_composio_connections_hub(self) -> None:
@@ -1639,15 +2488,40 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
             top = QHBoxLayout()
             top.setSpacing(6)
-            btn_home = _VectorIconButton("home", "Quick Chat Home")
-            btn_home.active_state = True
-            btn_home.clicked.connect(self._reset_to_chat_hero)
+            btn_home = _VectorIconButton("home", "PC Home Dashboard")
+            btn_home.clicked.connect(lambda: self._animate_to("dashboard", duration_ms=460))
+            btn_jarvis_chat = _VectorIconButton("chat", "JARVIS AI Chat")
+            btn_jarvis_chat.active_state = True
+            btn_jarvis_chat.clicked.connect(self._reset_to_chat_hero)
             self._sugg_nav_btn_chat = _VectorIconButton(
                 "connections",
                 "Composio Universal Connections Hub (1-click connect apps without .env edits)",
                 badge_count=0,
             )
             self._sugg_nav_btn_chat.clicked.connect(lambda: self._animate_to("suggestions", duration_ms=480))
+
+            # Live LLM Model Switcher Pill in the Notch Top Bar (Cloud Gemini/Gemma + Local LM Studio)
+            self._model_cycle_list = [
+                ("lmstudio:qwen3-8b", "⚡ LM Studio: Qwen3 8B"),
+                ("lmstudio:auto", "💻 LM Studio (Active Model)"),
+                ("gemma-4-26b-a4b-it", "🧠 Gemma 4 26B"),
+                ("gemini-3.5-flash-lite", "⚡ Gemini 3.5 Lite"),
+                ("gemini-3.8-flash", "☁️ Gemini 3.8"),
+                ("lmstudio:bonsai-27b", "🌿 LM Studio: Bonsai 27B"),
+            ]
+            self._model_pill_btn = QPushButton(self._current_model_label())
+            self._model_pill_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            self._model_pill_btn.setFixedHeight(30)
+            self._model_pill_btn.setToolTip("Click to switch active LLM model (Cloud Gemini/Gemma or Local Ollama)")
+            self._model_pill_btn.setStyleSheet(
+                "QPushButton { background: rgba(255,255,255,0.07); color: #cbd5e1; "
+                "border: 1px solid rgba(255,255,255,0.14); border-radius: 10px; "
+                "padding: 0 11px; font-size: 11px; font-weight: 700; }"
+                "QPushButton:hover { background: rgba(56,189,248,0.16); color: #ffffff; "
+                "border: 1px solid rgba(56,189,248,0.45); }"
+            )
+            self._model_pill_btn.clicked.connect(self._cycle_active_model)
+
             btn_wave = _VectorIconButton("waveform", "Voice Orb Mode")
             btn_wave.clicked.connect(self._enter_voice_mode)
             self._pin_btn_chat = _VectorIconButton("pin", "Pin Overlay Open")
@@ -1655,7 +2529,10 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             btn_collapse = _VectorIconButton("close", "Collapse to Top Notch (Esc)")
             btn_collapse.clicked.connect(lambda: self._animate_to("idle", duration_ms=460))
             top.addWidget(btn_home)
+            top.addWidget(btn_jarvis_chat)
             top.addWidget(self._sugg_nav_btn_chat)
+            top.addStretch(1)
+            top.addWidget(self._model_pill_btn)
             top.addStretch(1)
             top.addWidget(btn_wave)
             top.addWidget(self._pin_btn_chat)
@@ -1759,6 +2636,27 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
         # --- Actions & Backend Wiring ---
 
+        def _current_model_label(self) -> str:
+            cur = (config.LLM_MODEL or "").strip()
+            for m_id, lbl in getattr(self, "_model_cycle_list", []):
+                if m_id == cur:
+                    return lbl
+            if cur.lower().startswith(("ollama:", "local:")):
+                return f"💻 {cur.split(':', 1)[1][:14]}"
+            return f"🧠 {cur[:15]}"
+
+        def _cycle_active_model(self) -> None:
+            from brain.gemini import set_active_model
+
+            cur = (config.LLM_MODEL or "").strip()
+            ids = [m[0] for m in self._model_cycle_list]
+            try:
+                nxt = ids[(ids.index(cur) + 1) % len(ids)]
+            except ValueError:
+                nxt = ids[0]
+            set_active_model(nxt)
+            self._model_pill_btn.setText(self._current_model_label())
+
         def _reset_to_chat_hero(self) -> None:
             self._has_messages = False
             self._chat_output.hide()
@@ -1768,6 +2666,9 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
         def _toggle_pin(self) -> None:
             self.pinned = not self.pinned
+            if hasattr(self, "_pin_btn_dash"):
+                self._pin_btn_dash.active_state = self.pinned
+                self._pin_btn_dash.update()
             self._pin_btn_sugg.active_state = self.pinned
             self._pin_btn_chat.active_state = self.pinned
             self._pin_btn_sugg.update()
@@ -1822,10 +2723,16 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                         ),
                         loop,
                     )
-                    reply = fut.result(timeout=75.0)
+                    reply = fut.result(timeout=180.0)
                     self.reply_ready.emit(query, reply)
+                except TimeoutError:
+                    self.reply_ready.emit(
+                        query,
+                        "LM Studio is still generating tokens (took longer than 180s). "
+                        "Tip: Use Qwen3-8B (non-VL) or click the green 👁 icon on the left of the input bar to turn off Auto-See Screen.",
+                    )
                 except Exception as exc:
-                    self.reply_ready.emit(query, f"Error: {exc}")
+                    self.reply_ready.emit(query, f"Error: {type(exc).__name__}: {exc}")
                 finally:
                     self.service._busy = False
 

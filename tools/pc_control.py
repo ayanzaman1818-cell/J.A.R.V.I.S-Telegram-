@@ -377,18 +377,87 @@ _VK_MAP = {
     "volume_down": 0xAE,
     "volume_up": 0xAF,
     "next_track": 0xB0,
+    "next": 0xB0,
     "prev_track": 0xB1,
+    "prev": 0xB1,
     "stop": 0xB2,
     "play_pause": 0xB3,
+}
+
+_APPCOMMAND_MAP = {
+    "next_track": 11,      # APPCOMMAND_MEDIA_NEXTTRACK
+    "next": 11,
+    "prev_track": 12,      # APPCOMMAND_MEDIA_PREVIOUSTRACK
+    "prev": 12,
+    "stop": 13,            # APPCOMMAND_MEDIA_STOP
+    "play_pause": 14,      # APPCOMMAND_MEDIA_PLAY_PAUSE
 }
 
 
 def _send_vk(vk_code: int, steps: int = 1) -> None:
     if os.name != "nt":
         raise RuntimeError("Media/volume key control is only supported on Windows.")
+    user32 = ctypes.windll.user32
+    scan = user32.MapVirtualKeyW(vk_code, 0)
+    # Media & volume hardware virtual keys (0xAD..0xB3) require KEYEVENTF_EXTENDEDKEY (0x0001)
+    ext = 0x0001 if 0xAD <= vk_code <= 0xB3 else 0x0000
     for _ in range(max(1, min(steps, 25))):
-        ctypes.windll.user32.keybd_event(vk_code, 0, 0, 0)
-        ctypes.windll.user32.keybd_event(vk_code, 0, 2, 0)
+        user32.keybd_event(vk_code, scan, ext, 0)
+        user32.keybd_event(vk_code, scan, ext | 0x0002, 0)
+
+
+def send_media_transport_command(action: str) -> None:
+    """Trigger a media transport command (prev_track, play_pause, next_track) reliably across Windows and Spotify."""
+    if os.name != "nt":
+        return
+    act = (action or "").strip().lower()
+    vk = _VK_MAP.get(act)
+    if vk:
+        _send_vk(vk, 1)
+
+    # Also post WM_APPCOMMAND (0x0319) directly to any open Spotify window so background track skipping always works
+    app_cmd = _APPCOMMAND_MAP.get(act)
+    if not app_cmd:
+        return
+    user32 = ctypes.windll.user32
+    EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    cls_buf = ctypes.create_unicode_buffer(128)
+    lparam = app_cmd << 16
+
+    def _cb(hwnd: int, _lp: int) -> bool:
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        user32.GetClassNameW(hwnd, cls_buf, 128)
+        if not cls_buf.value.startswith("Chrome_WidgetWin"):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        t_low = buf.value.strip().lower()
+        if t_low.startswith("spotify") or (
+            " - " in buf.value
+            and not any(
+                b in t_low
+                for b in (
+                    "google chrome",
+                    "microsoft edge",
+                    "visual studio code",
+                    "antigravity",
+                    "discord",
+                    "lm studio",
+                    "telegram",
+                )
+            )
+        ):
+            user32.PostMessageW(hwnd, 0x0319, hwnd, lparam)
+        return True
+
+    try:
+        user32.EnumWindows(EnumWindowsProc(_cb), 0)
+    except Exception:
+        pass
 
 
 @tool(

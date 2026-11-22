@@ -77,6 +77,7 @@ How to work:
 - For multi-step tasks, chain tools until the job is done, then report the result.
 - Never claim you did something unless a tool actually did it.
 - Replies are read on a phone in Telegram: be concise. Plain-text mobile-friendly responses, no unnecessary formatting. Short lines, hyphens for lists. Include links when useful.
+- Do NOT call `speak` or `jarvis_voice_clip` on normal text messages unless the user explicitly asks for a voice note, audio clip, or to speak aloud.
 - If asked to be called or to set a reminder with a call, use the tools.
 - Use remember() when the user shares a lasting preference or fact about themselves.
 - Gmail and Drive search tools are read-only. To send an email or create a Drive file, first use the matching prepare tool, show the exact proposed result, and wait for an explicit user yes. Only then call confirm_action with its token. Never confirm based on an earlier or implied approval.
@@ -172,8 +173,11 @@ async def respond(
             for step in range(max_steps):
                 has_tool_results = any(m.get("role") == "tool" for m in hist[start + 1 :])
                 # On live voice calls (fast_voice=True), route directly to the ultra-low-latency model
-                # with MINIMAL thinking so voice responses start in <1s without hitting Gemma's 3.5s thinking pass.
-                if fast_voice and config.LLM_FALLBACK_MODEL:
+                # only when using cloud models; if the user selected a local LM Studio model, keep it on LM Studio.
+                from brain.gemini import is_local_model
+                if is_local_model(config.LLM_MODEL):
+                    step_model = config.LLM_MODEL
+                elif fast_voice and config.LLM_FALLBACK_MODEL:
                     step_model = config.LLM_FALLBACK_MODEL
                 elif has_tool_results:
                     step_model = config.LLM_FAST_MODEL

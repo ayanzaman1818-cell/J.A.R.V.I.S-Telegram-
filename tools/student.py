@@ -423,3 +423,79 @@ async def quiz_from_study_notes(ctx: ToolContext, subject: str = "") -> str:
 
     latest = notes[0]
     return f"🧠 Latest Study Note Review — {latest['title']}:\n\n{latest['content'][:1500]}"
+
+
+CASUAL_READING_TOPICS: tuple[tuple[str, str], ...] = (
+    ("Major Tech & AI Releases 2025 2026", "latest AI models, tech hardware, software & industry releases in 2025 and 2026"),
+    ("Video Games & Major Releases 2025 2026", "Grand Theft Auto VI GTA 6 release, major video game launches and gaming news 2025 2026"),
+    ("World Events & Global Headlines", "major world events, geopolitics, space exploration and global milestones 2025 2026"),
+    ("Movies, TV & Pop Culture 2025 2026", "biggest movies, streaming shows, music and pop culture highlights 2025 2026"),
+    ("Science, Space & Medicine Breakthroughs", "recent scientific discoveries, NASA/SpaceX missions, and medical breakthroughs 2025 2026"),
+    ("Consumer Gadgets, GPUs & Smartphones", "latest CPUs, GPUs, smartphones, Windows updates and consumer tech 2025 2026"),
+)
+
+
+async def run_casual_reading_refresh(ctx: ToolContext) -> str:
+    """Casually browse the web like someone picking up a book or magazine to stay current on modern life,
+    games, tech, science, and world events — quietly saving a compact 'Casual Reading' memory card in Second Brain.
+    """
+    import time as _time
+    from datetime import datetime
+
+    user_id = ctx.user_id or config.OWNER_ID
+    now_str = datetime.now(config.get_zoneinfo()).strftime("%d %b %Y")
+
+    # Also check what the user has been chatting about recently so Qwen reads up on things the user cares about
+    recent_hist = db.load_history_messages(ctx.chat_id or config.OWNER_ID, limit=12)
+    user_msgs = [
+        str(m.get("content", ""))
+        for m in recent_hist
+        if m.get("role") == "user" and len(str(m.get("content", ""))) > 12
+    ]
+
+    # Pick a rotating shelf topic or a recent user interest
+    existing_reading = db.list_knowledge_notes(limit=20, tag="casual-reading", user_id=user_id)
+    idx = len(existing_reading) % len(CASUAL_READING_TOPICS)
+    shelf_title, shelf_query = CASUAL_READING_TOPICS[idx]
+
+    # Every other time, if the user recently talked about something interesting, read up on that too
+    custom_topic = ""
+    if user_msgs and (len(existing_reading) % 2 == 1):
+        try:
+            from brain.gemini import _extract_auto_grounding_topic
+            for msg in reversed(user_msgs):
+                cand = _extract_auto_grounding_topic(msg)
+                if cand and len(cand) >= 4:
+                    custom_topic = cand
+                    break
+        except Exception:
+            pass
+
+    if custom_topic:
+        shelf_title = f"Catching Up: {custom_topic[:55]}"
+        shelf_query = f"{custom_topic} latest news facts 2025 2026"
+
+    snippets = await web_search(ctx, query=shelf_query, max_results=5)
+    if not snippets or snippets == "No results.":
+        return ""
+
+    # Format clean, lightweight web facts directly without calling the local LLM in the background
+    # (so background casual reading uses 0% CPU/GPU and never contends with the user's live chat!)
+    bullet_lines: list[str] = []
+    for line in snippets.splitlines():
+        s = line.strip()
+        if s:
+            bullet_lines.append(s)
+    digest = "\n".join(bullet_lines)[:1400]
+    urls = _extract_urls(snippets, max_urls=1)
+
+    note_title = f"Casual Reading ({now_str}): {shelf_title}"
+    note_id = db.add_knowledge_note(
+        title=note_title,
+        content=digest,
+        source_url=urls[0] if urls else "",
+        tags="casual-reading,world-knowledge",
+        user_id=user_id,
+    )
+    log.info("Casual reading refresh saved Note #%s: %s (0 LLM tokens used)", note_id, note_title)
+    return f"📖 Casual Reading Saved (#{note_id}): {note_title}\n\n{digest}"
