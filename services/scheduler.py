@@ -81,31 +81,55 @@ async def proactive_monitor_job(context: Any) -> None:
 
 
 async def check_persistent_reminders(context: Any) -> None:
-    """Deliver due reminders once, without repeating after optional call failures."""
+    """Deliver due reminders once, or execute autonomous [AGENT] background jobs."""
+    from tools.agentic import AGENT_JOB_PREFIX
+
     for reminder in db.due_reminders():
         reminder_id = reminder["id"]
         if not db.claim_reminder(reminder_id):
             continue
 
+        raw_msg = str(reminder.get("message") or "")
+        is_agent_job = raw_msg.startswith(AGENT_JOB_PREFIX)
+
         try:
-            markup = InlineKeyboardMarkup(
-                [
+            if is_agent_job:
+                instruction = raw_msg[len(AGENT_JOB_PREFIX) :].strip()
+                from brain.agent import respond as brain_respond
+                from services.telegram import TelegramService
+                from tools.base import ToolContext
+
+                ctx = ToolContext(
+                    bot=context.bot,
+                    chat_id=reminder["chat_id"],
+                    job_queue=getattr(context, "job_queue", None),
+                    user_id=reminder.get("user_id") or reminder["chat_id"],
+                )
+                reply = await brain_respond(ctx, instruction)
+                await TelegramService.send_long(
+                    context.bot,
+                    reminder["chat_id"],
+                    f"🤖 Autonomous Agent Report (#{reminder_id}):\n{reply}",
+                )
+            else:
+                markup = InlineKeyboardMarkup(
                     [
-                        InlineKeyboardButton(
-                            "✅ Done", callback_data=f"rem_done:{reminder_id}"
-                        ),
-                        InlineKeyboardButton(
-                            "💤 Snooze 10m",
-                            callback_data=f"rem_snooze:{reminder_id}:10",
-                        ),
+                        [
+                            InlineKeyboardButton(
+                                "✅ Done", callback_data=f"rem_done:{reminder_id}"
+                            ),
+                            InlineKeyboardButton(
+                                "💤 Snooze 10m",
+                                callback_data=f"rem_snooze:{reminder_id}:10",
+                            ),
+                        ]
                     ]
-                ]
-            )
-            await context.bot.send_message(
-                reminder["chat_id"],
-                f"Reminder: {reminder['message']}",
-                reply_markup=markup,
-            )
+                )
+                await context.bot.send_message(
+                    reminder["chat_id"],
+                    f"Reminder: {raw_msg}",
+                    reply_markup=markup,
+                )
         except Exception as exc:
             try:
                 db.fail_reminder(reminder_id, exc)
@@ -138,6 +162,47 @@ async def check_persistent_reminders(context: Any) -> None:
                     log.exception(
                         "Could not report phone-call failure for #%s", reminder_id
                     )
+
+
+async def backup_job(context: Any) -> None:
+    """Nightly SQLite backup; alerts the owner only if it fails."""
+    try:
+        from services.backup import backup_database
+
+        await asyncio.to_thread(backup_database)
+    except Exception as exc:
+        log.exception("Nightly database backup failed")
+        if config.OWNER_ID:
+            try:
+                await context.bot.send_message(
+                    config.OWNER_ID,
+                    f"⚠️ Nightly database backup failed: {type(exc).__name__}. Run /backup to retry.",
+                )
+            except Exception:
+                log.debug("Could not report backup failure", exc_info=True)
+
+
+async def auto_study_job(context: Any) -> None:
+    """Background self-study session: JARVIS studies the next lesson or discovers a new topic on its own."""
+    if not config.OWNER_ID or not config.AUTO_STUDY_ENABLED or config.is_quiet_hours():
+        return
+    try:
+        from services.telegram import TelegramService
+        from tools.base import ToolContext
+        from tools.student import run_study_session
+
+        ctx = ToolContext(
+            bot=context.bot,
+            chat_id=config.OWNER_ID,
+            job_queue=getattr(context, "job_queue", None),
+            user_id=config.OWNER_ID,
+        )
+        report = await run_study_session(ctx, auto_discover=True)
+        log.info("Silent background auto-study session completed")
+        if config.AUTO_STUDY_NOTIFY and report:
+            await TelegramService.send_long(context.bot, config.OWNER_ID, report)
+    except Exception:
+        log.warning("Background auto_study_job failed", exc_info=True)
 
 
 def register_jobs(app: Any) -> None:
@@ -196,3 +261,26 @@ def register_jobs(app: Any) -> None:
         first=90,
         name="proactive_monitor",
     )
+    try:
+        bh, bm = (int(x) for x in config.BACKUP_TIME.split(":"))
+        job_queue.run_daily(
+            backup_job,
+            time=dtime(bh, bm, tzinfo=config.get_zoneinfo()),
+            name="backup",
+        )
+        log.info("Nightly database backup scheduled for %s %s", config.BACKUP_TIME, config.TIMEZONE)
+    except Exception:
+        log.exception("Invalid BACKUP_TIME=%r; nightly backup not scheduled", config.BACKUP_TIME)
+
+    if config.OWNER_ID and config.AUTO_STUDY_ENABLED:
+        study_interval = max(1, int(config.AUTO_STUDY_INTERVAL_HOURS)) * 3600
+        job_queue.run_repeating(
+            auto_study_job,
+            interval=study_interval,
+            first=600,
+            name="auto_study",
+        )
+        log.info(
+            "Autonomous self-study loop scheduled every %sh",
+            config.AUTO_STUDY_INTERVAL_HOURS,
+        )

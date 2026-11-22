@@ -18,9 +18,44 @@ from brain.history import history_to_gemini
 log = logging.getLogger("jarvis.brain.gemini")
 
 PRIMARY_COOLDOWN_SECONDS = 180
+PRIMARY_MAX_COOLDOWN_SECONDS = 3600
 _GEMINI_SLOTS: asyncio.Semaphore | None = None
 _client: genai.Client | None = None
 _primary_down_until: float = 0.0
+# Consecutive primary failures. While > 0 the breaker is open: user requests go
+# straight to the fallback model and a background probe decides when to close it,
+# so users never pay the primary model's timeout while it is degraded.
+_primary_failures: int = 0
+_probe_task: asyncio.Task | None = None
+_STATS: dict[str, dict[str, Any]] = {}
+
+
+def _record(model: str, ok: bool, elapsed: float) -> None:
+    """Keep rolling per-model success/failure counts and recent latencies for /health."""
+    from collections import deque
+
+    entry = _STATS.setdefault(
+        model, {"ok": 0, "fail": 0, "latencies": deque(maxlen=50), "last_error": ""}
+    )
+    if ok:
+        entry["ok"] += 1
+        entry["latencies"].append(elapsed)
+    else:
+        entry["fail"] += 1
+
+
+def model_stats() -> dict[str, dict[str, Any]]:
+    """Return a JSON-friendly snapshot of per-model reliability stats."""
+    out: dict[str, dict[str, Any]] = {}
+    for model, entry in _STATS.items():
+        lat = sorted(entry["latencies"])
+        out[model] = {
+            "ok": entry["ok"],
+            "fail": entry["fail"],
+            "median_s": round(lat[len(lat) // 2], 2) if lat else None,
+            "last_error": entry["last_error"],
+        }
+    return out
 
 
 def _slots() -> asyncio.Semaphore:
@@ -62,8 +97,12 @@ class GeminiFailure(Exception):
         super().__init__(type(primary).__name__)
 
 
-def _request_timeout_seconds() -> float:
-    return float(max(5, int(config.LLM_TIMEOUT_SECONDS)))
+def _request_timeout_seconds(fast_fail: bool = False) -> float:
+    """Per-request timeout. fast_fail caps the primary model when a fallback is ready."""
+    full = float(max(5, int(config.LLM_TIMEOUT_SECONDS)))
+    if fast_fail:
+        return min(full, float(max(3, int(config.LLM_PRIMARY_TIMEOUT_SECONDS))))
+    return full
 
 
 def _backoff_seconds(attempt: int) -> float:
@@ -159,16 +198,113 @@ def _primary_paused() -> bool:
     return time.time() < _primary_down_until
 
 
+def _cooldown_for(failures: int) -> int:
+    """Exponential cooldown: 3m, 6m, 12m, 24m, then capped at 60m."""
+    return int(min(PRIMARY_COOLDOWN_SECONDS * (2 ** max(0, failures - 1)), PRIMARY_MAX_COOLDOWN_SECONDS))
+
+
 def _note_primary_failure(model: str) -> None:
-    global _primary_down_until
+    global _primary_down_until, _primary_failures
     if not model or model == config.LLM_FALLBACK_MODEL:
         return
-    _primary_down_until = time.time() + PRIMARY_COOLDOWN_SECONDS
+    _primary_failures += 1
+    cooldown = _cooldown_for(_primary_failures)
+    _primary_down_until = time.time() + cooldown
     log.warning(
-        "Primary Gemini model paused for %ss after a deadline or outage: model=%s",
-        PRIMARY_COOLDOWN_SECONDS,
+        "Primary Gemini model paused for %ss after a deadline or outage: model=%s consecutive_failures=%s",
+        cooldown,
         model,
+        _primary_failures,
     )
+
+
+def _note_primary_success() -> None:
+    global _primary_down_until, _primary_failures
+    if _primary_failures:
+        log.info("Primary Gemini model recovered after %s failure(s)", _primary_failures)
+    _primary_down_until = 0.0
+    _primary_failures = 0
+
+
+def _breaker_open() -> bool:
+    """True while the primary is paused or awaiting a successful background probe."""
+    return _primary_paused() or _primary_failures > 0
+
+
+_DEEP_THINKING_RE = re.compile(
+    r"\b(architect|debug|refactor|prove|derive|step[- ]by[- ]step|trade[- ]?offs|"
+    r"root cause|algorithm|optimize|why does|compare in depth)\b",
+    re.I,
+)
+
+
+def _thinking_config_for(
+    model: str,
+    user_text: str = "",
+    *,
+    force_low: bool = False,
+) -> types.ThinkingConfig | None:
+    """Select the lowest supported thinking mode for routine turns, scaling up only for complex queries.
+    Returns None for models (such as Gemma 4) that do not accept thinking_config.
+    """
+    m_low = (model or "").lower()
+    if "gemma" in m_low:
+        return None
+    text = (user_text or "").strip()
+    is_deep = (not force_low) and (len(text) > 450 or bool(_DEEP_THINKING_RE.search(text)))
+
+    if "2.5" in m_low:
+        return types.ThinkingConfig(thinking_budget=1024 if is_deep else 0)
+
+    if is_deep:
+        level = getattr(config, "LLM_DEEP_THINKING_LEVEL", "MEDIUM") or "MEDIUM"
+        if level == "MINIMAL" and "lite" not in m_low:
+            level = "LOW"
+        return types.ThinkingConfig(thinking_level=level)
+
+    # Routine turn or post-tool summarization: use MINIMAL on flash-lite, LOW on standard flash
+    if "lite" in m_low:
+        return types.ThinkingConfig(thinking_level="MINIMAL")
+    base_lvl = getattr(config, "LLM_THINKING_LEVEL", "LOW") or "LOW"
+    if base_lvl == "MINIMAL":
+        base_lvl = "LOW"
+    return types.ThinkingConfig(thinking_level=base_lvl)
+
+
+async def _probe_primary(model: str) -> None:
+    """Send a tiny request to the primary model off the user's critical path (with LOW thinking)."""
+    try:
+        probe_cfg: dict[str, Any] = {
+            "max_output_tokens": 8,
+            "temperature": 0.0,
+        }
+        tc = _thinking_config_for(model, force_low=True)
+        if tc is not None:
+            probe_cfg["thinking_config"] = tc
+        await _generate(
+            model,
+            [{"role": "user", "parts": [{"text": "Reply with OK."}]}],
+            types.GenerateContentConfig(**probe_cfg),
+            attempts=1,
+            timeout=_request_timeout_seconds(fast_fail=True),
+        )
+        _note_primary_success()
+    except Exception as exc:
+        if _is_transient_server_error(exc):
+            _note_primary_failure(model)
+        else:
+            log.info("Primary probe inconclusive: kind=%s", failure_kind(exc))
+
+
+def _maybe_start_probe(model: str) -> None:
+    """Kick off one background probe once the cooldown has elapsed."""
+    global _probe_task
+    if _primary_paused() or (_probe_task and not _probe_task.done()):
+        return
+    try:
+        _probe_task = asyncio.get_running_loop().create_task(_probe_primary(model))
+    except RuntimeError:
+        _probe_task = None
 
 
 def model_health() -> dict[str, Any]:
@@ -179,6 +315,9 @@ def model_health() -> dict[str, Any]:
         "deep": config.LLM_DEEP_MODEL,
         "fallback": config.LLM_FALLBACK_MODEL,
         "primary_paused_seconds": remaining,
+        "primary_failures": _primary_failures,
+        "probing": bool(_probe_task and not _probe_task.done()),
+        "stats": model_stats(),
     }
 
 
@@ -241,6 +380,7 @@ async def _generate(
     generation_config: types.GenerateContentConfig,
     *,
     attempts: int = 2,
+    timeout: float | None = None,
 ):
     client = get_client()
     if client is None:
@@ -249,7 +389,7 @@ async def _generate(
         )
 
     last_error: Exception | None = None
-    timeout = _request_timeout_seconds()
+    timeout = timeout if timeout is not None else _request_timeout_seconds()
     for attempt in range(attempts):
         started = time.perf_counter()
         try:
@@ -276,10 +416,13 @@ async def _generate(
                 attempts,
                 time.perf_counter() - started,
             )
+            _record(model, True, time.perf_counter() - started)
             return response
         except Exception as exc:
             last_error = exc
             kind = failure_kind(exc)
+            _record(model, False, time.perf_counter() - started)
+            _STATS[model]["last_error"] = f"{kind} {_error_status(exc) or ''}".strip()
             log.warning(
                 "Gemini request failed: model=%s attempt=%s/%s kind=%s status=%s elapsed=%.2fs error=%s detail=%s",
                 model,
@@ -318,6 +461,7 @@ async def chat(
     force_model: str | None = None,
     media_bytes: bytes | None = None,
     mime_type: str | None = None,
+    thinking_budget: int | None = None,
 ):
     global _primary_down_until
     if get_client() is None:
@@ -338,32 +482,44 @@ async def chat(
         media_part = types.Part.from_bytes(data=media_bytes, mime_type=mime_type)
         attached = False
         for item in reversed(contents):
-            if item.get("role") == "user" and any("text" in p for p in item.get("parts", [])):
+            if item.get("role") == "user" and any(
+                isinstance(p, dict) and "text" in p for p in item.get("parts", [])
+            ):
                 item["parts"].append(media_part)
                 attached = True
                 break
         if not attached:
             contents.append({"role": "user", "parts": [media_part]})
 
-    request_config: dict[str, Any] = {
-        "system_instruction": system_instruction,
-        "temperature": config.LLM_TEMPERATURE,
-        "max_output_tokens": config.LLM_MAX_OUTPUT_TOKENS,
-    }
-    if use_tools:
-        request_config["tools"] = [{"function_declarations": _function_declarations()}]
-    generation_config = types.GenerateContentConfig(**request_config)
+    def _build_gen_config(target_model: str) -> types.GenerateContentConfig:
+        cfg: dict[str, Any] = {
+            "system_instruction": system_instruction,
+            "temperature": config.LLM_TEMPERATURE,
+            "max_output_tokens": config.LLM_MAX_OUTPUT_TOKENS,
+        }
+        tc = _thinking_config_for(
+            target_model,
+            user_text,
+            force_low=(thinking_budget == 0),
+        )
+        if tc is not None:
+            cfg["thinking_config"] = tc
+        if use_tools:
+            cfg["tools"] = [{"function_declarations": _function_declarations()}]
+        return types.GenerateContentConfig(**cfg)
 
     fallback_model = config.LLM_FALLBACK_MODEL
-    if model != fallback_model and fallback_model and _primary_paused():
+    has_fallback = bool(fallback_model and model != fallback_model)
+    if has_fallback and _breaker_open():
         log.warning(
             "Primary Gemini model still paused; using fallback immediately: fallback=%s",
             fallback_model,
         )
+        _maybe_start_probe(model)
         return await _generate(
             fallback_model,
             contents,
-            generation_config,
+            _build_gen_config(fallback_model),
             attempts=config.GEMINI_FALLBACK_RETRIES,
         )
 
@@ -371,20 +527,26 @@ async def chat(
         response = await _generate(
             model,
             contents,
-            generation_config,
+            _build_gen_config(model),
             attempts=config.GEMINI_RETRY_ATTEMPTS,
+            timeout=_request_timeout_seconds(fast_fail=has_fallback),
         )
-        _primary_down_until = 0.0
+        _note_primary_success()
         return response
     except Exception as primary_error:
         kind = failure_kind(primary_error)
         if _is_transient_server_error(primary_error):
             _note_primary_failure(model)
-        if not (
-            _is_transient_server_error(primary_error)
+        elif kind == "rate_limit" and "gemma" in (model or "").lower():
+            # Gemma models have a strict 15k TPM free-tier quota; pause primary for 60s and use Gemini fallback
+            global _primary_down_until
+            _primary_down_until = max(_primary_down_until, time.time() + 60.0)
+        can_fallback = (
+            (_is_transient_server_error(primary_error) or (kind == "rate_limit" and "gemma" in (model or "").lower()))
             and fallback_model
             and fallback_model != model
-        ):
+        )
+        if not can_fallback:
             log.info(
                 "Gemini fallback skipped: model=%s kind=%s fallback=%s",
                 model,
@@ -403,7 +565,7 @@ async def chat(
             return await _generate(
                 fallback_model,
                 contents,
-                generation_config,
+                _build_gen_config(fallback_model),
                 attempts=config.GEMINI_FALLBACK_RETRIES,
             )
         except Exception as fallback_error:

@@ -41,11 +41,11 @@ async def set_reminder(
 @tool(
     "set_reminder_at",
     "Set a persistent reminder at a natural-language time such as 'tomorrow at 8pm'. "
-    "Optionally repeat daily or weekly.",
+    "Optionally repeat daily, on weekdays (Mon-Fri), weekly, or monthly.",
     {
         "when": {"type": "string"},
         "message": {"type": "string"},
-        "recurrence": {"type": "string", "enum": ["daily", "weekly"]},
+        "recurrence": {"type": "string", "enum": ["daily", "weekdays", "weekly", "monthly"]},
         "call": {"type": "boolean"},
     },
     ["when", "message"],
@@ -68,6 +68,11 @@ async def set_reminder_at(
         due = None
     if not due:
         return "I couldn't parse that time. Please give a specific date and time."
+    if recurrence == "weekdays":
+        from datetime import timedelta
+
+        while due.weekday() >= 5:
+            due += timedelta(days=1)
     reminder_id = db.create_reminder(
         ctx.chat_id,
         due,
@@ -76,7 +81,8 @@ async def set_reminder_at(
         recurrence=recurrence,
         user_id=ctx.user_id,
     )
-    return f"Reminder #{reminder_id} set for {_fmt_time(due)}."
+    repeat = f", repeating {recurrence}" if recurrence else ""
+    return f"Reminder #{reminder_id} set for {_fmt_time(due)}{repeat}."
 
 
 @tool("list_reminders", "List upcoming persistent reminders.")
@@ -146,3 +152,151 @@ async def complete_task(ctx: ToolContext, task_id: int) -> str:
         if db.complete_task(task_id, user_id=ctx.user_id)
         else "No open task with that ID."
     )
+
+
+@tool(
+    "start_focus_timer",
+    "Start a Pomodoro / deep focus countdown timer that alerts the user when time is up.",
+    {
+        "minutes": {
+            "type": "integer",
+            "description": "Focus duration in minutes (default 25, 1..240).",
+        },
+        "label": {
+            "type": "string",
+            "description": "What the user is focusing on (e.g. 'Deep work on API').",
+        },
+    },
+    [],
+)
+async def start_focus_timer(
+    ctx: ToolContext, minutes: int = 25, label: str = "Deep focus session"
+) -> str:
+    dur = max(1, min(int(minutes or 25), 240))
+    task_label = (label or "Deep focus session").strip()
+    due = db.now() + timedelta(minutes=dur)
+    msg = f"🎯 Focus session complete ({dur}m): {task_label}"
+    reminder_id = db.create_reminder(
+        ctx.chat_id, due, msg, call=False, user_id=ctx.user_id
+    )
+    return (
+        f"🎯 Focus timer #{reminder_id} started for {dur} minutes: '{task_label}'. "
+        f"I will notify you at {_fmt_time(due)}."
+    )
+
+
+def build_export_payload(
+    dataset: str = "expenses", days: int = 90, user_id: int | None = None
+) -> tuple[str, bytes, int]:
+    """Build an export file (filename, utf8_bytes, row_count) for expenses, tasks, notes, or habits."""
+    import csv
+    import io
+
+    kind = (dataset or "expenses").strip().lower()
+    span = max(1, min(int(days or 90), 3650))
+
+    if kind == "expenses":
+        items = db.list_expenses(days=span, limit=2000, user_id=user_id)
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["id", "created_at", "amount", "currency", "category", "note"])
+        for e in items:
+            writer.writerow(
+                [
+                    e["id"],
+                    e["created_at"],
+                    f"{float(e['amount']):.2f}",
+                    e["currency"],
+                    e["category"],
+                    e.get("note", ""),
+                ]
+            )
+        return f"jarvis_expenses_{span}d.csv", buf.getvalue().encode("utf-8"), len(items)
+
+    if kind == "tasks":
+        open_tasks = db.list_tasks(status="open", limit=500, user_id=user_id)
+        done_tasks = db.list_tasks(status="done", limit=500, user_id=user_id)
+        all_tasks = open_tasks + done_tasks
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["id", "status", "priority", "title", "due_at", "created_at"])
+        for t in all_tasks:
+            writer.writerow(
+                [
+                    t["id"],
+                    t["status"],
+                    t["priority"],
+                    t["title"],
+                    t.get("due_at") or "",
+                    t.get("created_at") or "",
+                ]
+            )
+        return "jarvis_tasks.csv", buf.getvalue().encode("utf-8"), len(all_tasks)
+
+    if kind == "habits":
+        summary = db.habit_summary(days=span, user_id=user_id)
+        habits = summary.get("habits") or []
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["habit", "count_in_period", "active_days", "streak_days", "last_logged"])
+        for h in habits:
+            writer.writerow(
+                [
+                    h["habit"],
+                    h["total_count"],
+                    h["active_days"],
+                    h.get("streak", 0),
+                    h["last_logged"],
+                ]
+            )
+        return f"jarvis_habits_{span}d.csv", buf.getvalue().encode("utf-8"), len(habits)
+
+    if kind == "notes":
+        notes = db.list_knowledge_notes(limit=500, user_id=user_id)
+        lines = [f"# JARVIS Second Brain Export ({len(notes)} notes)\n"]
+        for n in notes:
+            lines.append(f"## #{n['id']} — {n['title']}")
+            lines.append(f"- Created: {n.get('created_at', '')}")
+            if n.get("tags"):
+                lines.append(f"- Tags: {n['tags']}")
+            if n.get("source_url"):
+                lines.append(f"- Source: {n['source_url']}")
+            lines.append(f"\n{n.get('content', '').strip()}\n\n---\n")
+        return "jarvis_notes.md", "\n".join(lines).encode("utf-8"), len(notes)
+
+    raise ValueError(f"Unsupported export dataset: {dataset}")
+
+
+@tool(
+    "export_data",
+    "Export the user's expenses, tasks, habits, or Second Brain notes as a downloadable CSV/Markdown file in Telegram.",
+    {
+        "dataset": {
+            "type": "string",
+            "enum": ["expenses", "tasks", "habits", "notes"],
+            "description": "Which dataset to export.",
+        },
+        "days": {
+            "type": "integer",
+            "description": "Lookback window in days for expenses/habits (default 90).",
+        },
+    },
+    ["dataset"],
+)
+async def export_data(ctx: ToolContext, dataset: str, days: int = 90) -> str:
+    import io
+
+    filename, data_bytes, count = build_export_payload(
+        dataset=dataset, days=days, user_id=ctx.user_id
+    )
+    if ctx.bot and ctx.chat_id:
+        bio = io.BytesIO(data_bytes)
+        bio.name = filename
+        await ctx.bot.send_document(
+            ctx.chat_id,
+            document=bio,
+            filename=filename,
+            caption=f"📦 Exported {count} {dataset} record(s) ({filename}).",
+        )
+        return f"Sent {filename} ({count} records) to Telegram."
+    return f"Prepared {filename} with {count} {dataset} record(s) ({len(data_bytes)} bytes)."

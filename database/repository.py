@@ -21,11 +21,42 @@ from database.models import (
     PendingAction,
     PriceWatchItem,
     ReminderItem,
+    StudyTopic,
     SystemStatus,
     TaskItem,
 )
 
 log = logging.getLogger("jarvis.database")
+
+RECURRENCES = ("daily", "weekdays", "weekly", "monthly")
+
+
+def _add_month(dt: datetime) -> datetime:
+    """Same day next month, clamped to the month's last day (Jan 31 -> Feb 28/29)."""
+    import calendar
+
+    year, month = (dt.year + 1, 1) if dt.month == 12 else (dt.year, dt.month + 1)
+    day = min(dt.day, calendar.monthrange(year, month)[1])
+    return dt.replace(year=year, month=month, day=day)
+
+
+def next_occurrence(due: datetime, recurrence: str, now: datetime) -> datetime:
+    """Advance a recurring reminder's due time to the first slot strictly after `now`."""
+    recurrence = (recurrence or "").strip().lower()
+    if recurrence == "monthly":
+        anchor_day = due.day
+        while due <= now:
+            due = _add_month(due)
+            # Restore the original day where possible (e.g. 31st after a short month).
+            try:
+                due = due.replace(day=anchor_day)
+            except ValueError:
+                pass
+        return due
+    step = timedelta(days=7 if recurrence == "weekly" else 1)
+    while due <= now or (recurrence == "weekdays" and due.weekday() >= 5):
+        due += step
+    return due
 
 
 class DatabaseRepository:
@@ -203,6 +234,22 @@ class DatabaseRepository:
 
                 CREATE INDEX IF NOT EXISTS idx_price_watches_active
                     ON price_watches(active, user_id);
+
+                CREATE TABLE IF NOT EXISTS study_topics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL DEFAULT {default_owner},
+                    subject TEXT NOT NULL,
+                    level INTEGER NOT NULL DEFAULT 1,
+                    lessons_completed INTEGER NOT NULL DEFAULT 0,
+                    next_subtopic TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT NOT NULL,
+                    last_studied_at TEXT,
+                    UNIQUE(user_id, subject)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_study_topics_user_status
+                    ON study_topics(user_id, status);
                 """
             )
 
@@ -532,12 +579,10 @@ class DatabaseRepository:
         reminder_id = int(reminder["id"])
 
         with self._connect() as conn:
-            if recurrence in {"daily", "weekly"}:
-                interval = timedelta(days=1 if recurrence == "daily" else 7)
-                due = datetime.fromisoformat(reminder["due_at"])
-                current = self.now()
-                while due <= current:
-                    due += interval
+            if recurrence in RECURRENCES:
+                due = next_occurrence(
+                    datetime.fromisoformat(reminder["due_at"]), recurrence, self.now()
+                )
                 conn.execute(
                     """UPDATE reminders
                        SET due_at = ?, delivery_state = 'pending',
@@ -1087,6 +1132,155 @@ class DatabaseRepository:
             cur = conn.execute(
                 "UPDATE price_watches SET active = 0 WHERE id = ? AND user_id = ? AND active = 1",
                 (int(watch_id), uid),
+            )
+        return bool(cur.rowcount)
+
+    # --- Autonomous Student Curriculum (study_topics) ---
+
+    @staticmethod
+    def _row_to_study_topic(row: sqlite3.Row) -> dict[str, Any]:
+        return StudyTopic(
+            id=int(row["id"]),
+            user_id=int(row["user_id"]),
+            subject=str(row["subject"]),
+            level=int(row["level"]),
+            lessons_completed=int(row["lessons_completed"]),
+            next_subtopic=str(row["next_subtopic"] or ""),
+            status=str(row["status"] or "active"),
+            created_at=str(row["created_at"]),
+            last_studied_at=row["last_studied_at"],
+        ).to_dict()
+
+    def enroll_study_topic(
+        self,
+        subject: str,
+        next_subtopic: str = "",
+        user_id: int | None = None,
+    ) -> dict[str, Any]:
+        uid = self._resolve_user_id(user_id)
+        clean_subj = subject.strip()
+        if not clean_subj:
+            raise ValueError("Study subject cannot be empty.")
+        now_iso = self.now().isoformat()
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT * FROM study_topics WHERE user_id = ? AND LOWER(subject) = LOWER(?)",
+                (uid, clean_subj),
+            ).fetchone()
+            if existing:
+                sub = next_subtopic.strip() or existing["next_subtopic"]
+                conn.execute(
+                    """UPDATE study_topics
+                       SET status = 'active', next_subtopic = ?
+                       WHERE id = ?""",
+                    (sub, existing["id"]),
+                )
+                row = conn.execute(
+                    "SELECT * FROM study_topics WHERE id = ?", (existing["id"],)
+                ).fetchone()
+                return self._row_to_study_topic(row)
+
+            cur = conn.execute(
+                """INSERT INTO study_topics(
+                       user_id, subject, level, lessons_completed, next_subtopic, status, created_at
+                   ) VALUES (?, ?, 1, 0, ?, 'active', ?)""",
+                (uid, clean_subj, next_subtopic.strip(), now_iso),
+            )
+            topic_id = int(cur.lastrowid)
+            row = conn.execute(
+                "SELECT * FROM study_topics WHERE id = ?", (topic_id,)
+            ).fetchone()
+        self.audit("study_topic_enrolled", f"#{topic_id} {clean_subj}", user_id=uid)
+        return self._row_to_study_topic(row)
+
+    def list_study_topics(
+        self, status: str = "active", user_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        uid = self._resolve_user_id(user_id)
+        with self._connect() as conn:
+            if status and status != "all":
+                rows = conn.execute(
+                    """SELECT * FROM study_topics
+                       WHERE user_id = ? AND status = ?
+                       ORDER BY id ASC""",
+                    (uid, status),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM study_topics WHERE user_id = ? ORDER BY id ASC",
+                    (uid,),
+                ).fetchall()
+        return [self._row_to_study_topic(r) for r in rows]
+
+    def get_study_topic(
+        self, topic_id: int, user_id: int | None = None
+    ) -> dict[str, Any] | None:
+        uid = self._resolve_user_id(user_id)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM study_topics WHERE id = ? AND user_id = ?",
+                (int(topic_id), uid),
+            ).fetchone()
+        return self._row_to_study_topic(row) if row else None
+
+    def pick_next_study_topic(
+        self, user_id: int | None = None
+    ) -> dict[str, Any] | None:
+        """Pick the active study topic that was studied least recently (or never)."""
+        uid = self._resolve_user_id(user_id)
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT * FROM study_topics
+                   WHERE user_id = ? AND status = 'active'
+                   ORDER BY last_studied_at IS NOT NULL, last_studied_at ASC, id ASC
+                   LIMIT 1""",
+                (uid,),
+            ).fetchone()
+        return self._row_to_study_topic(row) if row else None
+
+    def record_study_lesson(
+        self,
+        topic_id: int,
+        next_subtopic: str = "",
+        advance_level: bool = True,
+        user_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        uid = self._resolve_user_id(user_id)
+        now_iso = self.now().isoformat()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM study_topics WHERE id = ? AND user_id = ?",
+                (int(topic_id), uid),
+            ).fetchone()
+            if not row:
+                return None
+            lessons = int(row["lessons_completed"]) + 1
+            curr_level = int(row["level"])
+            new_level = min(5, curr_level + 1) if advance_level else curr_level
+            conn.execute(
+                """UPDATE study_topics
+                   SET lessons_completed = ?, level = ?, next_subtopic = ?, last_studied_at = ?
+                   WHERE id = ?""",
+                (lessons, new_level, next_subtopic.strip(), now_iso, int(topic_id)),
+            )
+            updated = conn.execute(
+                "SELECT * FROM study_topics WHERE id = ?", (int(topic_id),)
+            ).fetchone()
+        self.audit(
+            "study_lesson_completed",
+            f"#{topic_id} lesson={lessons} level={new_level}",
+            user_id=uid,
+        )
+        return self._row_to_study_topic(updated) if updated else None
+
+    def set_study_topic_status(
+        self, topic_id: int, status: str, user_id: int | None = None
+    ) -> bool:
+        uid = self._resolve_user_id(user_id)
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE study_topics SET status = ? WHERE id = ? AND user_id = ?",
+                (status.strip().lower(), int(topic_id), uid),
             )
         return bool(cur.rowcount)
 

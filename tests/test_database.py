@@ -134,6 +134,35 @@ class DatabaseTests(unittest.TestCase):
         self.assertTrue(self.repo.cancel_price_watch(wid, user_id=601))
         self.assertEqual(self.repo.list_price_watches(user_id=601), [])
 
+    def test_weekdays_and_monthly_recurrence_and_online_backup(self):
+        from datetime import datetime
+        import config
+        from database.repository import next_occurrence
+        from services.backup import backup_database, list_backups
+
+        tz = config.get_zoneinfo()
+        # Friday -> next weekday is Monday
+        fri = datetime(2026, 11, 20, 9, 0, tzinfo=tz)
+        nxt = next_occurrence(fri, "weekdays", fri)
+        self.assertEqual(nxt.weekday(), 0)
+        self.assertEqual(nxt.day, 23)
+
+        # Monthly from Jan 31 -> clamps to Feb 28
+        jan31 = datetime(2026, 1, 31, 10, 0, tzinfo=tz)
+        feb_due = next_occurrence(jan31, "monthly", jan31)
+        self.assertEqual((feb_due.month, feb_due.day), (2, 28))
+
+        # Test online SQLite backup & pruning
+        bdir = Path(self.tmp.name) / "backups"
+        b1 = backup_database(db_path=self.db_path, backup_dir=bdir, keep=2)
+        b2 = backup_database(db_path=self.db_path, backup_dir=bdir, keep=2)
+        b3 = backup_database(db_path=self.db_path, backup_dir=bdir, keep=2)
+        self.assertTrue(b3.exists())
+        kept = list_backups(bdir)
+        self.assertEqual(len(kept), 2)
+        self.assertNotIn(b1, kept)
+        self.assertIn(b2, kept)
+
 
 if __name__ == "__main__":
     unittest.main()

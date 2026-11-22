@@ -30,6 +30,14 @@ from database.repository import db
 
 log = logging.getLogger("jarvis.telegram")
 
+# Process-wide health counters surfaced by /health.
+HEALTH: dict[str, float] = {
+    "started": time.time(),
+    "errors": 0,
+    "network_errors": 0,
+    "last_network_error": 0.0,
+}
+
 AgentResponder = Callable[..., Coroutine[Any, Any, str]]
 ResetHandler = Callable[[int], Any]
 BriefingSender = Callable[[Any, int, Any], Coroutine[Any, Any, None]]
@@ -197,16 +205,26 @@ class TelegramService:
             "/briefing - generate and deliver your morning briefing now\n"
             "/evening - generate and deliver your evening reflection now\n"
             "/tasks - list open personal tasks with quick-complete buttons\n"
+            "/plan <goal> - decompose a high-level goal into tasks & Second Brain roadmap\n"
+            "/research <topic> - run autonomous multi-query web research & archive report\n"
+            "/study [now|quiz|<subject>] (or /learn) - autonomous student mode: self-study & flashcards\n"
+            "/automate [when | prompt] (or /jobs) - schedule or manage standing background agent jobs\n"
+            "/focus [mins] [task] - start a Pomodoro / deep focus countdown timer\n"
             "/reminders - list active scheduled reminders with cancel buttons\n"
             "/expenses - view 30-day expense breakdown and chart button\n"
             "/habits (or /stats) - view habit streaks and heatmap chart button\n"
             "/notes [query] (or /brain) - list or search your Second Brain knowledge vault\n"
+            "/export [dataset] - download expenses, tasks, habits, or notes as CSV/Markdown\n"
             "/watch - list active product price-drop watches\n"
             "/pc (or /pcstatus) - PC hardware status, clipboard, focus modes & remote controls\n"
+            "/top - inspect top memory-hungry PC processes with one-tap Kill buttons\n"
+            "/download <url> - download any file URL directly to your PC Downloads folder\n"
             "/clip [text] - view PC clipboard or copy <text> to PC clipboard\n"
             "/lock - lock your Windows PC immediately (owner only)\n"
             "/memory (or /memories) - list remembered facts and user preferences\n"
             "/status - display system health, voice engine, models, and database counts\n"
+            "/health (or /diag) - live diagnostics: model breaker, latency, voice, backups, errors\n"
+            "/backup [send] - back up the database now; 'send' also delivers the file (owner only)\n"
             "/model - inspect active Gemini models and circuit-breaker status\n"
             "/reset (or /clear) - clear current conversation context while keeping long-term memory\n"
             "/call <message> - ring your phone with a spoken message (owner only)\n"
@@ -386,18 +404,31 @@ class TelegramService:
         markup = InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("📸 Screenshot", callback_data="pc_act:screenshot"),
-                    InlineKeyboardButton("⏯ Play/Pause", callback_data="pc_act:play_pause"),
+                    InlineKeyboardButton("📸 Smart Screenshot", callback_data="pc_act:screenshot"),
+                    InlineKeyboardButton("👁 AI Screen Inspect", callback_data="pc_act:inspect"),
                 ],
                 [
+                    InlineKeyboardButton("🪟 Open Windows", callback_data="pc_act:windows"),
+                    InlineKeyboardButton("⚙️ Top Processes", callback_data="pc_act:top"),
+                ],
+                [
+                    InlineKeyboardButton("⏯ Play/Pause", callback_data="pc_act:play_pause"),
                     InlineKeyboardButton("🔇 Mute", callback_data="pc_act:mute"),
-                    InlineKeyboardButton("🔒 Lock PC", callback_data="pc_act:lock"),
+                ],
+                [
+                    InlineKeyboardButton("☕ Toggle Keep-Awake", callback_data="pc_act:caffeine"),
+                    InlineKeyboardButton("🖥 Display Off", callback_data="pc_act:display_off"),
                 ],
                 [
                     InlineKeyboardButton("📋 Read Clipboard", callback_data="pc_act:clipboard"),
-                    InlineKeyboardButton("💼 Work Mode", callback_data="pc_act:work"),
+                    InlineKeyboardButton("🗂 Tidy Downloads", callback_data="pc_act:organize"),
                 ],
                 [
+                    InlineKeyboardButton("🌐 Network Info", callback_data="pc_act:network"),
+                    InlineKeyboardButton("🔒 Lock PC", callback_data="pc_act:lock"),
+                ],
+                [
+                    InlineKeyboardButton("💼 Work Mode", callback_data="pc_act:work"),
                     InlineKeyboardButton("🌙 Night Mode", callback_data="pc_act:night"),
                 ],
             ]
@@ -541,18 +572,59 @@ class TelegramService:
             if update.message:
                 await update.message.reply_text("Only the bot owner can place phone calls.")
             return
-        if not self.phone_call_fn:
-            if update.message:
-                await update.message.reply_text("Voice call service is not initialized yet.")
-            return
-        text = " ".join(context.args or []) or "Jarvis here. Just testing the line."
-        try:
-            await self.phone_call_fn(text)
-            if update.message:
-                await update.message.reply_text("Calling you now.")
-        except Exception as exc:
-            if update.message:
-                await update.message.reply_text(f"Couldn't place the call: {exc}")
+        text = " ".join(context.args or []) or f"At your service, {config.USER_NAME}. How may I assist you?"
+
+        # 1. Preferred: Real Native 1-on-1 Telegram VoIP Call (if jarvis_call_userbot.session is logged in)
+        from services.telegram_call import is_native_call_configured, place_native_telegram_call
+
+        if is_native_call_configured():
+            try:
+                status_msg = await place_native_telegram_call(
+                    target_user_id=update.effective_user.id,
+                    greeting=text,
+                )
+                if update.message:
+                    await update.message.reply_text(
+                        f"📞 **Ringing your Telegram app now!**\n{status_msg}\n\n"
+                        "Pick up the incoming Telegram call to talk back and forth with JARVIS."
+                    )
+                return
+            except Exception as exc:
+                log.warning("Native Telegram VoIP call failed, falling back: %s", exc)
+
+        # 2. Fallback: Free Interactive Web Voice Call link + instructions for Native Telegram Call setup
+        from services.twilio_webhook import get_web_call_url, start_twilio_webhook_server
+
+        await start_twilio_webhook_server(bot=context.bot, job_queue=context.job_queue)
+        call_url = get_web_call_url(greeting=text)
+
+        twilio_note = ""
+        if self.phone_call_fn:
+            from services.voice import calls_enabled
+
+            if calls_enabled():
+                try:
+                    await self.phone_call_fn(text)
+                    twilio_note = "\n\n📲 Also ringing your phone via Twilio."
+                except Exception as exc:
+                    twilio_note = f"\n\n(Twilio carrier call skipped: {exc})"
+
+        if update.message:
+            is_https = call_url.startswith("https://")
+            markup = (
+                InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("📞 Answer Live Voice Call with JARVIS", url=call_url)]]
+                )
+                if is_https
+                else None
+            )
+            await update.message.reply_text(
+                f"📞 **Incoming Live Voice Call from J.A.R.V.I.S.**\n\n"
+                f"{call_url}{twilio_note}\n\n"
+                f"💡 *Want a real native Telegram VoIP Call that rings your Telegram app directly?*\n"
+                f"Run `py setup_telegram_call.py` once in your terminal and log in with JARVIS's secondary Telegram account!",
+                reply_markup=markup,
+            )
 
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -630,17 +702,46 @@ class TelegramService:
                     await query.answer("Owner only.", show_alert=True)
                     return
                 act = data.split(":", 1)[1]
+                from tools import pc_control as pc_mod
                 from tools.pc_control import (
                     pc_clipboard_get,
                     pc_focus_mode,
+                    pc_inspect_window,
+                    pc_list_windows,
                     pc_lock,
                     pc_media_control,
+                    pc_network_info,
+                    pc_organize_downloads,
+                    pc_power_control,
                     pc_screenshot,
+                    pc_stay_awake,
+                    pc_top_processes,
                 )
 
                 await query.answer(f"Running {act}...")
                 if act == "screenshot":
-                    await pc_screenshot(ctx)
+                    await pc_screenshot(ctx, hide_telegram=True)
+                elif act == "inspect":
+                    res = await pc_inspect_window(ctx)
+                    await self.send_long(context.bot, chat_id, res)
+                elif act == "windows":
+                    res = await pc_list_windows(ctx)
+                    await query.message.reply_text(res)
+                elif act == "top":
+                    res = await pc_top_processes(ctx, limit=8)
+                    await query.message.reply_text(res)
+                elif act == "caffeine":
+                    res = await pc_stay_awake(ctx, enabled=not pc_mod._CAFFEINE_ACTIVE)
+                    await query.message.reply_text(res)
+                elif act == "display_off":
+                    res = await pc_power_control(ctx, action="display_off")
+                    await query.message.reply_text(res)
+                elif act == "organize":
+                    res = await pc_organize_downloads(ctx, folder="downloads")
+                    await query.message.reply_text(res)
+                elif act == "network":
+                    res = await pc_network_info(ctx)
+                    await query.message.reply_text(res)
                 elif act == "lock":
                     res = await pc_lock(ctx)
                     await query.message.reply_text(res)
@@ -653,6 +754,18 @@ class TelegramService:
                 elif act in ("work", "night", "chill", "meeting"):
                     res = await pc_focus_mode(ctx, mode=act)
                     await query.message.reply_text(res)
+                return
+
+            if data.startswith("pc_kill:"):
+                if not self._is_owner(update):
+                    await query.answer("Owner only.", show_alert=True)
+                    return
+                pid_str = data.split(":", 1)[1]
+                from tools.pc_control import pc_kill_process
+
+                await query.answer(f"Terminating PID {pid_str}...")
+                res = await pc_kill_process(ctx, target=pid_str)
+                await query.message.reply_text(res)
                 return
 
             if data.startswith("chart:"):
@@ -702,6 +815,56 @@ class TelegramService:
 
                 await query.answer("Playing MCU JARVIS voice clip...")
                 await jarvis_voice_clip(ctx, category=cat)
+                return
+
+            if data.startswith("export:"):
+                dataset = data.split(":", 1)[1]
+                from tools.productivity import export_data
+
+                await query.answer(f"Exporting {dataset}...")
+                await export_data(ctx, dataset=dataset, days=90)
+                return
+
+            if data.startswith("focus:"):
+                mins = int(data.split(":", 1)[1])
+                from tools.productivity import start_focus_timer
+
+                label = "Short break" if mins <= 10 else "Deep focus session"
+                await query.answer(f"Starting {mins}m timer...")
+                msg = await start_focus_timer(ctx, minutes=mins, label=label)
+                await query.message.reply_text(msg)
+                return
+
+            if data.startswith("study_now:"):
+                arg = data.split(":", 1)[1]
+                from tools.student import run_study_session
+
+                await query.answer("Starting autonomous study session...")
+                await query.message.reply_text("🎓 Sitting down to study on the web and take notes...")
+                tid = int(arg) if arg.isdigit() and int(arg) > 0 else None
+                report = await run_study_session(ctx, topic_id=tid, auto_discover=True)
+                await self.send_long(context.bot, chat_id, report)
+                return
+
+            if data.startswith("study_quiz:"):
+                subj = data.split(":", 1)[1]
+                from tools.student import quiz_from_study_notes
+
+                await query.answer("Preparing flashcard review...")
+                quiz = await quiz_from_study_notes(ctx, subject="" if subj == "all" else subj)
+                await self.send_long(context.bot, chat_id, quiz)
+                return
+
+            if data.startswith("study_toggle:"):
+                tid = int(data.split(":", 1)[1])
+                topic = db.get_study_topic(tid, user_id=user_id)
+                if topic:
+                    new_st = "paused" if topic["status"] == "active" else "active"
+                    db.set_study_topic_status(tid, new_st, user_id=user_id)
+                    await query.answer(f"Topic #{tid} {new_st}")
+                    await query.message.reply_text(
+                        f"🎓 Study topic #{tid} ('{topic['subject']}') is now {new_st}."
+                    )
                 return
 
             await query.answer()
@@ -930,7 +1093,411 @@ class TelegramService:
 
     @staticmethod
     async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        log.error("Unhandled Telegram error", exc_info=context.error)
+        """Log transient network blips as one-line warnings; keep tracebacks for real bugs."""
+        from telegram.error import Conflict, NetworkError, RetryAfter, TimedOut
+
+        err = context.error
+        HEALTH["errors"] += 1
+        if isinstance(err, Conflict):
+            log.error(
+                "Telegram polling conflict: another JARVIS instance is using this bot token. "
+                "Stop the duplicate process."
+            )
+        elif isinstance(err, RetryAfter):
+            log.warning("Telegram flood control: retry after %ss", err.retry_after)
+        elif isinstance(err, (TimedOut, NetworkError)):
+            HEALTH["network_errors"] += 1
+            HEALTH["last_network_error"] = time.time()
+            log.warning("Telegram network issue (will retry automatically): %s", err)
+        else:
+            log.error("Unhandled Telegram error", exc_info=err)
+
+    async def cmd_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Live diagnostics: uptime, model breaker state & latency, voice, backups, errors."""
+        if not self._is_authorized(update) or not update.message:
+            return
+        up = int(time.time() - HEALTH["started"])
+        lines = [f"🩺 JARVIS health — up {up // 86400}d {up % 86400 // 3600}h {up % 3600 // 60}m"]
+        try:
+            from brain.gemini import model_health
+
+            h = model_health()
+            if h["primary_paused_seconds"]:
+                state = f"paused {h['primary_paused_seconds']}s (failures: {h['primary_failures']})"
+            elif h["primary_failures"]:
+                state = "probing for recovery" if h["probing"] else "awaiting probe"
+            else:
+                state = "healthy"
+            lines.append(f"- Primary {h['primary']}: {state}")
+            lines.append(f"- Fallback {h['fallback']}")
+            for model, s in h["stats"].items():
+                med = f"{s['median_s']}s" if s["median_s"] is not None else "n/a"
+                err = f", last error {s['last_error']}" if s["fail"] and s["last_error"] else ""
+                lines.append(f"  · {model}: {s['ok']} ok / {s['fail']} failed, median {med}{err}")
+        except Exception:
+            lines.append("- Gemini stats unavailable")
+        try:
+            from services import voice as voice_svc
+
+            lines.append(f"- Fish Audio voice: {voice_svc.fish_status()}")
+        except Exception:
+            pass
+        try:
+            from services.backup import backup_summary
+
+            lines.append(f"- Backups: {backup_summary()}")
+        except Exception:
+            pass
+        try:
+            size_kb = config.DB_PATH.stat().st_size / 1024
+            lines.append(f"- Database: {size_kb:.0f} KB")
+        except OSError:
+            pass
+        net = HEALTH["network_errors"]
+        last = HEALTH["last_network_error"]
+        ago = f", last {int((time.time() - last) // 60)}m ago" if last else ""
+        lines.append(f"- Telegram network blips: {net}{ago}; other errors: {HEALTH['errors'] - net}")
+        await update.message.reply_text("\n".join(lines))
+
+    async def cmd_backup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Back up the SQLite database now; '/backup send' also delivers the file here."""
+        if not self._is_owner(update) or not update.message:
+            return
+        from services.backup import backup_database
+
+        try:
+            path = await asyncio.to_thread(backup_database)
+        except Exception as exc:
+            log.exception("Manual backup failed")
+            await update.message.reply_text(f"Backup failed: {type(exc).__name__}")
+            return
+        size_kb = path.stat().st_size / 1024
+        await update.message.reply_text(f"💾 Backup saved: {path.name} ({size_kb:.0f} KB)")
+        if context.args and context.args[0].lower() == "send":
+            with open(path, "rb") as f:
+                await update.message.reply_document(
+                    f, filename=path.name, caption="Private JARVIS database backup. Keep it safe."
+                )
+
+    async def cmd_focus(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Start a Pomodoro / deep focus countdown timer (/focus [minutes] [label])."""
+        if not self._is_authorized(update) or not update.message:
+            return
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        ctx = self._make_ctx(context, chat_id, user_id)
+
+        if not context.args:
+            markup = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("🎯 25m Pomodoro", callback_data="focus:25"),
+                        InlineKeyboardButton("🔥 50m Deep Work", callback_data="focus:50"),
+                        InlineKeyboardButton("☕ 5m Break", callback_data="focus:5"),
+                    ]
+                ]
+            )
+            await update.message.reply_text(
+                "🎯 Select a focus timer preset, or send `/focus <minutes> [task]` (e.g. `/focus 25 API refactor`):",
+                reply_markup=markup,
+            )
+            return
+
+        from tools.productivity import start_focus_timer
+
+        args = list(context.args)
+        if args[0].isdigit():
+            minutes = int(args[0])
+            label = " ".join(args[1:]).strip() or "Deep focus session"
+        else:
+            minutes = 25
+            label = " ".join(args).strip()
+
+        msg = await start_focus_timer(ctx, minutes=minutes, label=label)
+        await update.message.reply_text(msg)
+
+    async def cmd_export(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Export expenses, tasks, habits, or Second Brain notes as downloadable CSV/Markdown."""
+        if not self._is_authorized(update) or not update.message:
+            return
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        ctx = self._make_ctx(context, chat_id, user_id)
+
+        valid = ("expenses", "tasks", "habits", "notes")
+        if context.args and context.args[0].lower().rstrip("s") + "s" in valid:
+            raw = context.args[0].lower()
+            dataset = raw if raw in valid else raw.rstrip("s") + "s"
+            days = int(context.args[1]) if len(context.args) > 1 and context.args[1].isdigit() else 90
+            from tools.productivity import export_data
+
+            await export_data(ctx, dataset=dataset, days=days)
+            return
+
+        markup = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("💸 Expenses (CSV)", callback_data="export:expenses"),
+                    InlineKeyboardButton("✅ Tasks (CSV)", callback_data="export:tasks"),
+                ],
+                [
+                    InlineKeyboardButton("🔥 Habits (CSV)", callback_data="export:habits"),
+                    InlineKeyboardButton("🧠 Notes (Markdown)", callback_data="export:notes"),
+                ],
+            ]
+        )
+        await update.message.reply_text(
+            "📦 Choose a dataset to export as a file, or use `/export <expenses|tasks|habits|notes> [days]`:",
+            reply_markup=markup,
+        )
+
+    async def cmd_research(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Run an autonomous multi-source deep research workflow (/research <topic>)."""
+        if not self._is_authorized(update) or not update.message:
+            return
+        topic = " ".join(context.args or []).strip()
+        if not topic:
+            await update.message.reply_text(
+                "🔬 Usage: `/research <topic or question>`\n"
+                "Example: `/research Rust vs Go for high-throughput microservices`"
+            )
+            return
+
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        ctx = self._make_ctx(context, chat_id, user_id)
+        await update.message.reply_text(f"🔬 Launching autonomous deep research on: '{topic}'...")
+
+        stop_typing = asyncio.Event()
+        typing_task = asyncio.create_task(self.keep_typing(context.bot, chat_id, stop_typing))
+        try:
+            from tools.agentic import deep_research
+
+            report = await deep_research(ctx, topic=topic, save_to_vault=True)
+        finally:
+            stop_typing.set()
+            typing_task.cancel()
+
+        await self.send_long(context.bot, chat_id, report)
+
+    async def cmd_plan(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Autonomously decompose a goal into actionable tasks & roadmap (/plan <goal>)."""
+        if not self._is_authorized(update) or not update.message:
+            return
+        goal = " ".join(context.args or []).strip()
+        if not goal:
+            await update.message.reply_text(
+                "🗺 Usage: `/plan <goal or project>`\n"
+                "Example: `/plan Launch my portfolio website by Friday`"
+            )
+            return
+
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        ctx = self._make_ctx(context, chat_id, user_id)
+        from tools.agentic import plan_goal
+
+        result = await plan_goal(ctx, goal=goal)
+        await self.send_long(context.bot, chat_id, result)
+
+    async def cmd_automate(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """List or schedule autonomous background agent jobs (/automate [when | instruction])."""
+        if not self._is_authorized(update) or not update.message:
+            return
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        ctx = self._make_ctx(context, chat_id, user_id)
+
+        raw = " ".join(context.args or []).strip()
+        if not raw:
+            from tools.agentic import AGENT_JOB_PREFIX
+
+            items = [
+                r
+                for r in db.upcoming_reminders(limit=20, user_id=user_id)
+                if str(r.get("message", "")).startswith(AGENT_JOB_PREFIX)
+            ]
+            if not items:
+                await update.message.reply_text(
+                    "🤖 No active autonomous agent jobs.\n\n"
+                    "Schedule one with:\n"
+                    "`/automate <when> | <instruction>`\n"
+                    "Examples:\n"
+                    "- `/automate in 30 minutes | Check my PC CPU and RAM usage`\n"
+                    "- `/automate daily 09:00 | Check top Hacker News AI stories and summarize`\n"
+                    "- `/automate weekdays 08:30 | Summarize my high-priority tasks and weather`"
+                )
+                return
+
+            lines = ["🤖 Active Autonomous Agent Jobs:"]
+            buttons = []
+            for r in items[:10]:
+                instr = str(r["message"])[len(AGENT_JOB_PREFIX) :]
+                rep = f" [{r['recurrence']}]" if r.get("recurrence") else ""
+                lines.append(f"#{r['id']} ({r['due_at']}){rep}: {instr}")
+                buttons.append(
+                    [
+                        InlineKeyboardButton(
+                            f"❌ Cancel Job #{r['id']}",
+                            callback_data=f"rem_cancel:{r['id']}",
+                        )
+                    ]
+                )
+            await update.message.reply_text(
+                "\n".join(lines),
+                reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+            )
+            return
+
+        from tools.agentic import schedule_agent_job
+
+        recurrence = ""
+        if "|" in raw:
+            when_part, instr_part = (p.strip() for p in raw.split("|", 1))
+        else:
+            parts = raw.split(None, 1)
+            if len(parts) < 2:
+                await update.message.reply_text(
+                    "Usage: `/automate <when> | <instruction>` (e.g. `/automate in 20m | Check PC status`)"
+                )
+                return
+            when_part, instr_part = parts[0], parts[1]
+
+        first_tok = when_part.split()[0].lower() if when_part.split() else ""
+        if first_tok in ("daily", "weekdays", "weekly", "monthly"):
+            recurrence = first_tok
+            when_part = when_part[len(first_tok) :].strip() or "09:00"
+
+        res = await schedule_agent_job(
+            ctx, when=when_part, instruction=instr_part, recurrence=recurrence
+        )
+        await update.message.reply_text(res)
+
+    async def cmd_study(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Manage JARVIS's Autonomous Student & Self-Learning Engine (/study [now|quiz|<subject>])."""
+        if not self._is_authorized(update) or not update.message:
+            return
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        ctx = self._make_ctx(context, chat_id, user_id)
+        arg = " ".join(context.args or []).strip()
+
+        from tools.student import (
+            enroll_study_topic,
+            list_study_curriculum,
+            quiz_from_study_notes,
+            run_study_session,
+        )
+
+        if not arg:
+            text = await list_study_curriculum(ctx)
+            topics = db.list_study_topics(status="all", user_id=user_id)
+            buttons = [
+                [
+                    InlineKeyboardButton(
+                        "📖 Study Next Lesson Now", callback_data="study_now:0"
+                    ),
+                    InlineKeyboardButton(
+                        "🧠 Flashcard Review", callback_data="study_quiz:all"
+                    ),
+                ]
+            ]
+            for t in topics[:4]:
+                toggle_lbl = "⏸ Pause" if t["status"] == "active" else "▶️ Resume"
+                buttons.append(
+                    [
+                        InlineKeyboardButton(
+                            f"📖 Study #{t['id']} ({t['subject'][:18]})",
+                            callback_data=f"study_now:{t['id']}",
+                        ),
+                        InlineKeyboardButton(
+                            f"{toggle_lbl} #{t['id']}",
+                            callback_data=f"study_toggle:{t['id']}",
+                        ),
+                    ]
+                )
+            await update.message.reply_text(
+                f"{text}\n\n"
+                "Commands:\n"
+                "- `/study now` — study a lesson right now (or self-discover a new topic)\n"
+                "- `/study <subject>` — enroll me in a subject & study Lesson #1\n"
+                "- `/study quiz [subject]` — review flashcards from my study notes",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            return
+
+        low = arg.lower()
+        if low == "now":
+            await update.message.reply_text("🎓 Studying next lesson on the web and writing notes...")
+            stop_typing = asyncio.Event()
+            typing_task = asyncio.create_task(self.keep_typing(context.bot, chat_id, stop_typing))
+            try:
+                report = await run_study_session(ctx, auto_discover=True)
+            finally:
+                stop_typing.set()
+                typing_task.cancel()
+            await self.send_long(context.bot, chat_id, report)
+            return
+
+        if low.startswith("quiz"):
+            subj = arg[4:].strip()
+            quiz = await quiz_from_study_notes(ctx, subject=subj)
+            await self.send_long(context.bot, chat_id, quiz)
+            return
+
+        await update.message.reply_text(f"🎓 Enrolling in '{arg}' and starting Lesson #1...")
+        stop_typing = asyncio.Event()
+        typing_task = asyncio.create_task(self.keep_typing(context.bot, chat_id, stop_typing))
+        try:
+            report = await enroll_study_topic(ctx, subject=arg, study_now=True)
+        finally:
+            stop_typing.set()
+            typing_task.cancel()
+        await self.send_long(context.bot, chat_id, report)
+
+    async def cmd_top(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """List top memory-consuming PC processes with one-tap Kill buttons (/top)."""
+        if not self._is_owner(update) or not update.message:
+            if update.message:
+                await update.message.reply_text("Only the bot owner can manage PC processes.")
+            return
+        from tools.pc_control import get_top_processes_list, pc_top_processes
+
+        ctx = self._make_ctx(context, update.effective_chat.id, update.effective_user.id)
+        text = await pc_top_processes(ctx, limit=8)
+        procs = await asyncio.to_thread(get_top_processes_list, 6)
+        my_pid = os.getpid()
+        buttons = []
+        for p in procs:
+            if p["pid"] not in (0, 4, my_pid) and p["name"].lower() not in ("explorer", "svchost", "system", "lsass", "csrss"):
+                buttons.append(
+                    [
+                        InlineKeyboardButton(
+                            f"🛑 Kill {p['name'][:18]} (PID {p['pid']} · {p['mem_mb']:.0f}MB)",
+                            callback_data=f"pc_kill:{p['pid']}",
+                        )
+                    ]
+                )
+        await update.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+        )
+
+    async def cmd_download(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Download a public file URL directly to the PC Downloads folder (/download <url>)."""
+        if not self._is_owner(update) or not update.message:
+            if update.message:
+                await update.message.reply_text("Only the bot owner can download files to the PC.")
+            return
+        url = " ".join(context.args or []).strip()
+        if not url:
+            await update.message.reply_text("📥 Usage: `/download <https://...>`")
+            return
+        from tools.pc_control import pc_download_url
+
+        ctx = self._make_ctx(context, update.effective_chat.id, update.effective_user.id)
+        res = await pc_download_url(ctx, url=url, folder="downloads")
+        await update.message.reply_text(res)
 
     @staticmethod
     def bot_commands() -> list[BotCommand]:
@@ -941,16 +1508,26 @@ class TelegramService:
             BotCommand("briefing", "Morning debrief now"),
             BotCommand("evening", "Evening reflection & wrap-up"),
             BotCommand("tasks", "List & complete open tasks"),
+            BotCommand("plan", "Decompose a goal into tasks & roadmap"),
+            BotCommand("research", "Autonomous multi-source deep research"),
+            BotCommand("study", "Autonomous self-learning student mode & syllabus"),
+            BotCommand("automate", "Schedule or list autonomous agent jobs"),
+            BotCommand("focus", "Start a Pomodoro / deep focus timer"),
             BotCommand("reminders", "List & cancel reminders"),
             BotCommand("expenses", "30-day expense report & chart"),
             BotCommand("habits", "Habit streaks & heatmap chart"),
             BotCommand("notes", "Second Brain knowledge vault"),
+            BotCommand("export", "Export expenses, tasks, habits, or notes"),
             BotCommand("watch", "Active price-drop watches"),
             BotCommand("pc", "PC status & remote control"),
+            BotCommand("top", "Top PC processes with Kill buttons"),
+            BotCommand("download", "Download a URL directly to PC Downloads"),
             BotCommand("clip", "Read or set PC clipboard"),
             BotCommand("lock", "Lock Windows PC screen"),
             BotCommand("memory", "List saved memories & preferences"),
             BotCommand("status", "Show Jarvis status"),
+            BotCommand("health", "Diagnostics: models, latency, voice, backups"),
+            BotCommand("backup", "Back up the database now (/backup send)"),
             BotCommand("model", "Show active Gemini models"),
             BotCommand("reset", "Reset conversation history"),
             BotCommand("call", "Ring my phone"),
@@ -968,6 +1545,14 @@ class TelegramService:
         app.add_handler(CommandHandler("call", self.cmd_call, block=False))
         app.add_handler(CommandHandler(["reset", "clear"], self.cmd_reset, block=False))
         app.add_handler(CommandHandler("status", self.cmd_status, block=False))
+        app.add_handler(CommandHandler(["health", "diag"], self.cmd_health, block=False))
+        app.add_handler(CommandHandler("backup", self.cmd_backup, block=False))
+        app.add_handler(CommandHandler(["focus", "pomodoro"], self.cmd_focus, block=False))
+        app.add_handler(CommandHandler("export", self.cmd_export, block=False))
+        app.add_handler(CommandHandler("research", self.cmd_research, block=False))
+        app.add_handler(CommandHandler("plan", self.cmd_plan, block=False))
+        app.add_handler(CommandHandler(["study", "learn"], self.cmd_study, block=False))
+        app.add_handler(CommandHandler(["automate", "jobs"], self.cmd_automate, block=False))
         app.add_handler(CommandHandler("model", self.cmd_model, block=False))
         app.add_handler(CommandHandler("tasks", self.cmd_tasks, block=False))
         app.add_handler(CommandHandler("reminders", self.cmd_reminders, block=False))
@@ -976,6 +1561,8 @@ class TelegramService:
         app.add_handler(CommandHandler(["notes", "brain"], self.cmd_notes, block=False))
         app.add_handler(CommandHandler(["watch", "watches"], self.cmd_watch, block=False))
         app.add_handler(CommandHandler(["pc", "pcstatus"], self.cmd_pc, block=False))
+        app.add_handler(CommandHandler("top", self.cmd_top, block=False))
+        app.add_handler(CommandHandler("download", self.cmd_download, block=False))
         app.add_handler(CommandHandler(["clip", "clipboard"], self.cmd_clip, block=False))
         app.add_handler(CommandHandler("lock", self.cmd_lock, block=False))
         app.add_handler(CommandHandler(["memory", "memories"], self.cmd_memory, block=False))
@@ -1003,6 +1590,14 @@ def build_telegram_app(
         ApplicationBuilder()
         .token(config.TELEGRAM_TOKEN)
         .concurrent_updates(8)
+        # Bounded timeouts so a flaky connection fails fast and retries instead of hanging.
+        .connect_timeout(10)
+        .read_timeout(20)
+        .write_timeout(30)
+        .media_write_timeout(60)
+        .pool_timeout(10)
+        .get_updates_connect_timeout(10)
+        .get_updates_read_timeout(30)
     )
     if post_init:
         builder = builder.post_init(post_init)

@@ -1,0 +1,943 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JARVIS Dynamic Island Notch</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/framer-motion@10.16.4/dist/framer-motion.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <style>
+    * {
+      box-sizing: border-box;
+      -webkit-font-smoothing: antialiased;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: transparent !important;
+      overflow: hidden;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      user-select: none;
+    }
+    /* Custom ultra-sleek scrollbar for chat & suggestions */
+    ::-webkit-scrollbar {
+      width: 5px;
+      height: 5px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.16);
+      border-radius: 9999px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(255, 255, 255, 0.3);
+    }
+    @keyframes floatSlow {
+      0%, 100% { transform: translateY(0px); }
+      50% { transform: translateY(-4px); }
+    }
+    .mascot-float {
+      animation: floatSlow 3.4s ease-in-out infinite;
+    }
+    @keyframes shimmerPulse {
+      0%, 100% { opacity: 0.45; }
+      50% { opacity: 1; }
+    }
+    .thinking-shimmer {
+      animation: shimmerPulse 1.5s ease-in-out infinite;
+    }
+    .markdown-body p { margin: 0 0 0.45rem 0; }
+    .markdown-body p:last-child { margin-bottom: 0; }
+    .markdown-body pre {
+      background: rgba(0, 0, 0, 0.55);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 8px;
+      padding: 8px 10px;
+      overflow-x: auto;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11.5px;
+      margin: 6px 0;
+    }
+    .markdown-body code {
+      font-family: 'JetBrains Mono', monospace;
+      background: rgba(255, 255, 255, 0.1);
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-size: 11.5px;
+    }
+    .markdown-body ul, .markdown-body ol {
+      margin: 4px 0 6px 18px;
+      padding: 0;
+    }
+    .markdown-body li {
+      margin-bottom: 2px;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useMemo } = React;
+    const motion = window.Motion ? window.Motion.motion : null;
+    const AnimatePresence = window.Motion ? window.Motion.AnimatePresence : null;
+
+    // Exact target sizes for each state — anchored dead-center at y=0
+    const STATE_DIMS = {
+      idle:        { w: 86,  h: 6,   radius: 5,  ear: 5  },
+      hover:       { w: 154, h: 18,  radius: 10, ear: 9  },
+      suggestions: { w: 456, h: 512, radius: 28, ear: 16 },
+      chat:        { w: 524, h: 332, radius: 28, ear: 16 },
+      chat_active: { w: 524, h: 468, radius: 28, ear: 16 },
+      voice:       { w: 440, h: 274, radius: 28, ear: 16 },
+    };
+
+    // --- Crisp Vector Icons (Lucide Style) ---
+    const IconHome = () => (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3 10.5L12 3l9 7.5V20a1 1 0 0 1-1 1h-5.5v-6h-5v6H4a1 1 0 0 1-1-1v-9.5z"/>
+      </svg>
+    );
+
+    const IconChatBolt = () => (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+        <path d="M13 7l-3 5h4l-3 5" stroke="#38bdf8" strokeWidth="2"/>
+      </svg>
+    );
+
+    const IconWaveform = () => (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+        <line x1="4" y1="10" x2="4" y2="14"/>
+        <line x1="8" y1="6" x2="8" y2="18"/>
+        <line x1="12" y1="3" x2="12" y2="21"/>
+        <line x1="16" y1="7" x2="16" y2="17"/>
+        <line x1="20" y1="10" x2="20" y2="14"/>
+      </svg>
+    );
+
+    const IconPin = ({ active }) => (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill={active ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="rotate-45">
+        <line x1="12" y1="17" x2="12" y2="22"/>
+        <path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/>
+      </svg>
+    );
+
+    const IconMic = () => (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+        <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+        <line x1="12" y1="19" x2="12" y2="22"/>
+      </svg>
+    );
+
+    const IconClose = () => (
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round">
+        <line x1="18" y1="6" x2="6" y2="18"/>
+        <line x1="6" y1="6" x2="18" y2="18"/>
+      </svg>
+    );
+
+    // --- 3D Glowing Green Wizard Mascot ("Merlin / Jarvis" from Images 3 & 4) ---
+    function WizardMascot({ size = 56 }) {
+      return (
+        <div className="relative flex items-center justify-center mascot-float" style={{ width: size, height: size }}>
+          <svg viewBox="0 0 100 100" className="w-full h-full overflow-visible drop-shadow-[0_6px_18px_rgba(132,204,22,0.42)]">
+            <defs>
+              <radialGradient id="slimeBody" cx="36%" cy="34%" r="62%">
+                <stop offset="0%" stopColor="#ecfccb" />
+                <stop offset="32%" stopColor="#a3e635" />
+                <stop offset="72%" stopColor="#65a30d" />
+                <stop offset="100%" stopColor="#365314" />
+              </radialGradient>
+              <linearGradient id="wizardHat" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stopColor="#52525b" />
+                <stop offset="50%" stopColor="#27272a" />
+                <stop offset="100%" stopColor="#09090b" />
+              </linearGradient>
+              <linearGradient id="magicSwirl" x1="0" y1="1" x2="1" y2="0">
+                <stop offset="0%" stopColor="#f472b6" />
+                <stop offset="50%" stopColor="#facc15" />
+                <stop offset="100%" stopColor="#38bdf8" />
+              </linearGradient>
+            </defs>
+            {/*Feet*/}
+            <ellipse cx="39" cy="84" rx="5.5" ry="4" fill="#65a30d" />
+            <ellipse cx="55" cy="84" rx="5.5" ry="4" fill="#65a30d" />
+            {/*Glowing green body*/}
+            <ellipse cx="48" cy="63" rx="23" ry="21" fill="url(#slimeBody)" />
+            {/*Left arm holding wand*/}
+            <ellipse cx="25" cy="61" rx="5.5" ry="4.5" fill="#84cc16" />
+            {/*Glowing white vertical eyes*/}
+            <rect x="40" y="54" width="4.4" height="10" rx="2.2" fill="#ffffff" />
+            <rect x="52" y="54" width="4.4" height="10" rx="2.2" fill="#ffffff" />
+            {/*Wizard hat brim & cone*/}
+            <ellipse cx="48" cy="44" rx="27" ry="6.5" fill="url(#wizardHat)" />
+            <path d="M26 44 L36 37 L44 13 Q49 8 55 12 L62 38 L70 44 Z" fill="url(#wizardHat)" />
+            {/*Golden star wand*/}
+            <line x1="17" y1="39" x2="27" y2="59" stroke="#a16207" strokeWidth="3.2" strokeLinecap="round" />
+            <polygon points="16,29 19,35 25,36 20,40 22,46 16,42 10,46 12,40 7,36 13,35" fill="#facc15" />
+            {/*Dark magic cauldron + rainbow sparkles*/}
+            <ellipse cx="72" cy="77" rx="13.5" ry="9.5" fill="#18181b" stroke="#3f3f46" strokeWidth="1.8" />
+            <ellipse cx="72" cy="71" rx="11" ry="3.5" fill="#27272a" />
+            <path d="M67 69 Q73 56 81 62 Q75 49 84 44" stroke="url(#magicSwirl)" strokeWidth="3.5" fill="none" strokeLinecap="round" />
+            <circle cx="67" cy="48" r="2" fill="#38bdf8" />
+            <circle cx="84" cy="54" r="2.2" fill="#f472b6" />
+            <circle cx="77" cy="41" r="1.8" fill="#facc15" />
+          </svg>
+        </div>
+      );
+    }
+
+    // --- 3D Suggestion Card Icons (Prism Play, Fluffy Cloud, 3D Calendar) ---
+    function SuggestionIcon({ kind }) {
+      if (kind === "cloud") {
+        return (
+          <div className="w-11 h-11 flex items-center justify-center shrink-0">
+            <svg viewBox="0 0 60 60" className="w-11 h-11 drop-shadow-[0_4px_8px_rgba(0,0,0,0.5)]">
+              <defs>
+                <radialGradient id="cloudG" cx="35%" cy="30%" r="70%">
+                  <stop offset="0%" stopColor="#ffffff" />
+                  <stop offset="70%" stopColor="#e2e8f0" />
+                  <stop offset="100%" stopColor="#94a3b8" />
+                </radialGradient>
+              </defs>
+              <circle cx="20" cy="36" r="11" fill="url(#cloudG)" />
+              <circle cx="31" cy="28" r="14" fill="url(#cloudG)" />
+              <circle cx="42" cy="36" r="10" fill="url(#cloudG)" />
+              <rect x="18" y="34" width="25" height="12" rx="6" fill="url(#cloudG)" />
+              <ellipse cx="28" cy="30" rx="2.3" ry="5" fill="#09090b" />
+              <ellipse cx="35" cy="30" rx="2.3" ry="5" fill="#09090b" />
+            </svg>
+          </div>
+        );
+      }
+      if (kind === "calendar") {
+        return (
+          <div className="w-11 h-11 flex items-center justify-center shrink-0">
+            <svg viewBox="0 0 60 60" className="w-11 h-11 drop-shadow-[0_4px_10px_rgba(59,130,246,0.35)]">
+              <rect x="10" y="12" width="40" height="38" rx="9" fill="#f1f5f9" />
+              <path d="M10 21 a9 9 0 0 1 9 -9 h22 a9 9 0 0 1 9 9 v3 H10 Z" fill="#3b82f6" />
+              <circle cx="21" cy="14" r="2.2" fill="#1e3a8a" />
+              <circle cx="39" cy="14" r="2.2" fill="#1e3a8a" />
+              <g fill="#94a3b8">
+                <rect x="16" y="29" width="6" height="5" rx="1.5" />
+                <rect x="27" y="29" width="6" height="5" rx="1.5" />
+                <rect x="38" y="29" width="6" height="5" rx="1.5" />
+                <rect x="16" y="38" width="6" height="5" rx="1.5" />
+                <rect x="27" y="38" width="6" height="5" rx="1.5" fill="#3b82f6" />
+                <rect x="38" y="38" width="6" height="5" rx="1.5" />
+              </g>
+            </svg>
+          </div>
+        );
+      }
+      return (
+        <div className="w-11 h-11 flex items-center justify-center shrink-0">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-300 via-sky-300 to-indigo-400 p-[1.5px] shadow-[0_4px_14px_rgba(56,189,248,0.35)]">
+            <div className="w-full h-full rounded-[10px] bg-gradient-to-tr from-sky-500/80 via-cyan-300/80 to-yellow-200/90 flex items-center justify-center">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="white" className="drop-shadow">
+                <polygon points="7,5 19,12 7,19" />
+              </svg>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // --- 60fps Volumetric 3D Blue/White Cloud Sphere Orb Canvas (Image 5) ---
+    function VolumetricCloudOrb({ active, onClick }) {
+      const canvasRef = useRef(null);
+
+      useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext("2d");
+        let animId;
+        let t = 0;
+
+        const render = () => {
+          t += active ? 0.045 : 0.018;
+          const w = canvas.width;
+          const h = canvas.height;
+          const cx = w / 2;
+          const cy = h / 2;
+          const baseR = 66;
+          const r = baseR * (1 + (active ? 0.035 : 0.012) * Math.sin(t * 1.7));
+
+          ctx.clearRect(0, 0, w, h);
+
+          // Soft outer ambient glow
+          const aura = ctx.createRadialGradient(cx, cy, r * 0.7, cx, cy, r + 16);
+          aura.addColorStop(0, active ? "rgba(56, 189, 248, 0.42)" : "rgba(56, 189, 248, 0.22)");
+          aura.addColorStop(1, "rgba(0, 0, 0, 0)");
+          ctx.fillStyle = aura;
+          ctx.beginPath();
+          ctx.arc(cx, cy, r + 16, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Clip to sphere
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(cx, cy, r, 0, Math.PI * 2);
+          ctx.clip();
+
+          // Deep sky-blue to bright white upper-right sphere gradient (matches Image 5)
+          const hx = cx + r * 0.25 * Math.cos(t * 0.6);
+          const hy = cy - r * 0.35 + r * 0.08 * Math.sin(t * 0.8);
+          const bg = ctx.createRadialGradient(hx, hy, r * 0.08, cx, cy + r * 0.2, r * 1.25);
+          bg.addColorStop(0, "#ffffff");
+          bg.addColorStop(0.28, "#e0f2fe");
+          bg.addColorStop(0.55, "#38bdf8");
+          bg.addColorStop(0.82, "#0284c7");
+          bg.addColorStop(1, "#0369a1");
+          ctx.fillStyle = bg;
+          ctx.fillRect(0, 0, w, h);
+
+          // Swirling volumetric cloud layers inside the orb
+          for (let i = 0; i < 6; i++) {
+            const angle = t * (0.5 + i * 0.12) + i * 1.1;
+            const wx = cx + Math.cos(angle) * (r * 0.34);
+            const wy = cy - r * 0.1 + Math.sin(angle * 0.9) * (r * 0.28);
+            const wr = r * (0.48 + 0.12 * Math.sin(t + i));
+            const cloud = ctx.createRadialGradient(wx, wy, 2, wx, wy, wr);
+            cloud.addColorStop(0, "rgba(255, 255, 255, 0.72)");
+            cloud.addColorStop(0.5, "rgba(224, 242, 254, 0.32)");
+            cloud.addColorStop(1, "rgba(56, 189, 248, 0)");
+            ctx.fillStyle = cloud;
+            ctx.beginPath();
+            ctx.arc(wx, wy, wr, 0, Math.PI * 2);
+            ctx.fill();
+          }
+
+          // Top-left rim specular highlight
+          const rim = ctx.createRadialGradient(cx - r * 0.3, cy - r * 0.35, 1, cx, cy, r);
+          rim.addColorStop(0, "rgba(255, 255, 255, 0.55)");
+          rim.addColorStop(0.4, "rgba(255, 255, 255, 0)");
+          ctx.fillStyle = rim;
+          ctx.fillRect(0, 0, w, h);
+
+          ctx.restore();
+          animId = requestAnimationFrame(render);
+        };
+        render();
+        return () => cancelAnimationFrame(animId);
+      }, [active]);
+
+      return (
+        <canvas
+          ref={canvasRef}
+          width={168}
+          height={168}
+          onClick={onClick}
+          title="Click to toggle voice listening"
+          className="cursor-pointer transition-transform duration-200 hover:scale-105 active:scale-95"
+        />
+      );
+    }
+
+    // --- Main Dynamic Island Notch Component ---
+    function DynamicNotchApp() {
+      const [mode, setMode] = useState("idle"); // idle | hover | suggestions | chat | voice
+      const [pinned, setPinned] = useState(false);
+      const [autoSee, setAutoSee] = useState(false);
+      const [query, setQuery] = useState("");
+      const [messages, setMessages] = useState([]);
+      const [thinking, setThinking] = useState(false);
+      const [pendingToken, setPendingToken] = useState("");
+      const [voiceStatus, setVoiceStatus] = useState("Connected");
+      const [voiceActive, setVoiceActive] = useState(false);
+      const [suggestions, setSuggestions] = useState([
+        {
+          icon: "prism",
+          title: "Offer a pawn, launch an attack",
+          meta: "Your screen · live vision",
+          body: "Inspect your active screen and get real-time tactical suggestions.",
+          btn: "Tell me more",
+          prompt: "Look at my screen right now, tell me what I'm working on, and give me helpful suggestions.",
+          auto_see: "true",
+        },
+        {
+          icon: "cloud",
+          title: "RTX 5060 Ti Price Tracking",
+          meta: "6m",
+          body: "",
+          btn: "Show more",
+          prompt: "Check my active price watches and report any updates.",
+          auto_see: "false",
+        },
+        {
+          icon: "calendar",
+          title: "Get ready for your meetings",
+          meta: "I can do this",
+          body: "I can check your Google Calendar and open tasks so you're ready before each meeting.",
+          btn: "Show more",
+          prompt: "Check my upcoming schedule, reminders, and high-priority open tasks.",
+          auto_see: "false",
+        },
+        {
+          icon: "prism",
+          title: "Autonomous Student & Second Brain",
+          meta: "Self-Study · today",
+          body: "Review what I've studied on the web or test yourself with flashcards.",
+          btn: "Show more",
+          prompt: "Show me your autonomous study syllabus and latest study notes.",
+          auto_see: "false",
+        },
+      ]);
+
+      const inputRef = useRef(null);
+      const chatScrollRef = useRef(null);
+      const bridgeRef = useRef(null);
+      const collapseTimerRef = useRef(null);
+
+      const effectiveKey = mode === "chat" && (messages.length > 0 || thinking) ? "chat_active" : mode;
+      const targetDim = STATE_DIMS[effectiveKey] || STATE_DIMS.idle;
+      const isCollapsed = mode === "idle" || mode === "hover";
+
+      const prevAreaRef = useRef(0);
+
+      // Notify Python bridge of current hitbox size: expand mask immediately when growing,
+      // wait 285ms for CSS transition to complete before tightening mask when shrinking!
+      const syncMask = (nextKey) => {
+        const d = STATE_DIMS[nextKey] || STATE_DIMS.idle;
+        const boxW = d.w + d.ear * 2 + 16;
+        const boxH = d.h + 14;
+        const area = boxW * boxH;
+        const isShrinking = area < prevAreaRef.current;
+        prevAreaRef.current = area;
+
+        if (bridgeRef.current && bridgeRef.current.updateHitBox) {
+          if (isShrinking) {
+            setTimeout(() => {
+              if (bridgeRef.current && bridgeRef.current.updateHitBox) {
+                bridgeRef.current.updateHitBox(boxW, boxH);
+              }
+            }, 285);
+          } else {
+            bridgeRef.current.updateHitBox(boxW, boxH);
+          }
+        }
+      };
+
+      useEffect(() => {
+        syncMask(effectiveKey);
+        if (mode === "chat" && inputRef.current) {
+          setTimeout(() => inputRef.current && inputRef.current.focus(), 80);
+        }
+      }, [effectiveKey, mode]);
+
+      useEffect(() => {
+        if (chatScrollRef.current) {
+          chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+        }
+      }, [messages, thinking]);
+
+      // Connect Qt QWebChannel bridge
+      useEffect(() => {
+        if (window.qt && window.QWebChannel) {
+          new window.QWebChannel(window.qt.webChannelTransport, (channel) => {
+            const bridge = channel.objects.jarvisBridge;
+            bridgeRef.current = bridge;
+            syncMask("idle");
+
+            bridge.onQueryReply.connect((userQuery, replyText, token) => {
+              setThinking(false);
+              setPendingToken(token || "");
+              setMessages((prev) => [...prev, { role: "assistant", text: replyText }]);
+              setVoiceActive(false);
+              setVoiceStatus("Connected");
+            });
+
+            bridge.onSuggestionsReady.connect((jsonStr) => {
+              try {
+                const parsed = JSON.parse(jsonStr);
+                if (Array.isArray(parsed) && parsed.length > 0) {
+                  setSuggestions(parsed);
+                }
+              } catch (e) {}
+            });
+
+            bridge.onVoiceStateChanged.connect((statusText, isRec) => {
+              setVoiceStatus(statusText);
+              setVoiceActive(Boolean(isRec));
+            });
+
+            bridge.onHotkeyToggle.connect(() => {
+              setMode((curr) => (curr === "idle" || curr === "hover" ? "chat" : "idle"));
+            });
+          });
+        }
+
+        const onKeyDown = (e) => {
+          if (e.key === "Escape") {
+            setMode("idle");
+          }
+        };
+        window.addEventListener("keydown", onKeyDown);
+        return () => window.removeEventListener("keydown", onKeyDown);
+      }, []);
+
+      const handleMouseEnter = () => {
+        if (collapseTimerRef.current) {
+          clearTimeout(collapseTimerRef.current);
+          collapseTimerRef.current = null;
+        }
+        if (mode === "idle") {
+          syncMask("hover");
+          setMode("hover");
+        }
+      };
+
+      const handleMouseLeave = () => {
+        if (mode === "hover") {
+          collapseTimerRef.current = setTimeout(() => {
+            setMode((curr) => (curr === "hover" ? "idle" : curr));
+          }, 90);
+        }
+      };
+
+      const handleNotchClick = () => {
+        if (isCollapsed) {
+          syncMask("suggestions");
+          if (bridgeRef.current && bridgeRef.current.requestSuggestions) {
+            bridgeRef.current.requestSuggestions();
+          }
+          setMode("suggestions");
+        }
+      };
+
+      const submitPrompt = (textToSend, forceSee = null) => {
+        const clean = (textToSend || "").trim();
+        if (!clean || thinking) return;
+        const useSee = forceSee !== null ? forceSee : autoSee;
+        setMessages((prev) => [...prev, { role: "user", text: clean, sawScreen: useSee }]);
+        setQuery("");
+        setThinking(true);
+        setPendingToken("");
+        syncMask("chat_active");
+        setMode("chat");
+
+        if (bridgeRef.current && bridgeRef.current.submitQuery) {
+          bridgeRef.current.submitQuery(clean, Boolean(useSee), false);
+        } else {
+          setTimeout(() => {
+            setThinking(false);
+            setMessages((prev) => [...prev, { role: "assistant", text: "Connected to JARVIS Brain." }]);
+          }, 600);
+        }
+      };
+
+      const handleSuggestionClick = (card) => {
+        const shouldSee = card.auto_see === "true";
+        if (shouldSee) setAutoSee(true);
+        submitPrompt(card.prompt, shouldSee);
+      };
+
+      const handleApprove = () => {
+        if (!pendingToken || thinking) return;
+        setThinking(true);
+        if (bridgeRef.current && bridgeRef.current.approvePending) {
+          bridgeRef.current.approvePending();
+        }
+      };
+
+      const openVoiceMode = () => {
+        syncMask("voice");
+        setMode("voice");
+        if (bridgeRef.current && bridgeRef.current.toggleVoiceRecording) {
+          bridgeRef.current.toggleVoiceRecording();
+        }
+      };
+
+      const toggleOrbRecording = () => {
+        if (bridgeRef.current && bridgeRef.current.toggleVoiceRecording) {
+          bridgeRef.current.toggleVoiceRecording();
+        } else {
+          setVoiceActive((v) => !v);
+          setVoiceStatus((s) => (s === "Connected" ? "Listening... (tap orb to send)" : "Connected"));
+        }
+      };
+
+      const closeVoiceMode = () => {
+        if (bridgeRef.current && bridgeRef.current.cancelVoiceRecording) {
+          bridgeRef.current.cancelVoiceRecording();
+        }
+        setVoiceActive(false);
+        setVoiceStatus("Connected");
+        setMode("chat");
+      };
+
+      const renderMarkdown = (txt) => {
+        try {
+          if (window.marked) {
+            return { __html: window.marked.parse(txt || "") };
+          }
+        } catch (e) {}
+        return { __html: (txt || "").replace(/\n/g, "<br/>") };
+      };
+
+      const earSize = targetDim.ear;
+
+      return (
+        <div className="w-screen h-screen flex justify-center items-start pt-0 pointer-events-none">
+          {/* Center-locked wrapper: expands symmetrically from top-center, NEVER slides from right */}
+          <div
+            onMouseEnter={handleMouseEnter}
+            onMouseLeave={handleMouseLeave}
+            onClick={handleNotchClick}
+            style={{
+              width: targetDim.w,
+              height: targetDim.h,
+              borderBottomLeftRadius: targetDim.radius,
+              borderBottomRightRadius: targetDim.radius,
+              transformOrigin: "top center",
+              transition:
+                "width 280ms cubic-bezier(0.22, 1, 0.36, 1), height 280ms cubic-bezier(0.22, 1, 0.36, 1), border-radius 280ms cubic-bezier(0.22, 1, 0.36, 1)",
+            }}
+            className={`relative pointer-events-auto bg-[#07080b] text-white shadow-[0_22px_60px_rgba(0,0,0,0.92)] border-x border-b border-white/[0.11] ${
+              isCollapsed ? "cursor-pointer" : ""
+            }`}
+          >
+            {/* Left Concave Top-Edge Notch Ear */}
+            <svg
+              width={earSize}
+              height={earSize}
+              viewBox="0 0 16 16"
+              style={{ left: -earSize + 0.5, top: 0, transition: "all 280ms cubic-bezier(0.22, 1, 0.36, 1)" }}
+              className="absolute pointer-events-none fill-[#07080b]"
+            >
+              <path d="M16 0 H0 A16 16 0 0 1 16 16 V0 Z" />
+            </svg>
+
+            {/* Right Concave Top-Edge Notch Ear */}
+            <svg
+              width={earSize}
+              height={earSize}
+              viewBox="0 0 16 16"
+              style={{ right: -earSize + 0.5, top: 0, transition: "all 280ms cubic-bezier(0.22, 1, 0.36, 1)" }}
+              className="absolute pointer-events-none fill-[#07080b]"
+            >
+              <path d="M0 0 H16 A16 16 0 0 0 0 16 V0 Z" />
+            </svg>
+
+            {/* Inner content clipping box */}
+            <div
+              style={{
+                borderBottomLeftRadius: targetDim.radius,
+                borderBottomRightRadius: targetDim.radius,
+              }}
+              className="relative w-full h-full overflow-hidden flex flex-col"
+            >
+              {/* Subtle ambient bottom teal/blue glow when expanded */}
+              {!isCollapsed && (
+                <div className="pointer-events-none absolute inset-x-0 bottom-0 h-36 bg-[radial-gradient(ellipse_at_bottom,rgba(14,165,233,0.16),transparent_70%)]" />
+              )}
+
+              {/* HOVER MICRO-PREVIEW */}
+              {mode === "hover" && (
+                <div className="w-full h-full flex items-center justify-between px-3.5 opacity-90">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_#34d399]" />
+                  <span className="text-[10px] font-semibold tracking-wider text-gray-300 uppercase">Jarvis</span>
+                  <span className="w-1.5 h-1.5 rounded-full bg-sky-400/80" />
+                </div>
+              )}
+
+              {/* VIEW 1: SUGGESTIONS (Image 3) */}
+              {mode === "suggestions" && (
+                <div className="relative z-10 flex flex-col h-full px-5 pt-3 pb-3.5 justify-between">
+                  {/* Header */}
+                  <div className="flex items-start justify-between">
+                    <div className="flex items-center gap-2 pt-1">
+                      <button
+                        onClick={() => setMode("suggestions")}
+                        title="Suggestions"
+                        className="w-8 h-8 rounded-lg bg-white/15 text-white flex items-center justify-center transition hover:bg-white/25"
+                      >
+                        <IconHome />
+                      </button>
+                      <button
+                        onClick={() => setMode("chat")}
+                        title="Quick Chat"
+                        className="w-8 h-8 rounded-lg bg-white/[0.08] text-gray-200 flex items-center justify-center transition hover:bg-white/20"
+                      >
+                        <IconChatBolt />
+                      </button>
+                    </div>
+
+                    <div className="flex flex-col items-center -mt-1">
+                      <div className="w-14 h-14 rounded-full bg-white/[0.04] border border-white/10 flex items-center justify-center">
+                        <WizardMascot size={50} />
+                      </div>
+                      <span className="-mt-1.5 px-3 py-0.5 rounded-full bg-[#14171f] border border-white/15 text-[11px] font-semibold text-gray-200 shadow">
+                        Jarvis
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 pt-1">
+                      <button
+                        onClick={openVoiceMode}
+                        title="Voice Mode"
+                        className="w-8 h-8 rounded-lg bg-white/[0.08] text-gray-200 flex items-center justify-center transition hover:bg-white/20"
+                      >
+                        <IconWaveform />
+                      </button>
+                      <button
+                        onClick={() => setPinned(!pinned)}
+                        title={pinned ? "Pinned open" : "Pin overlay"}
+                        className={`w-8 h-8 rounded-lg flex items-center justify-center transition ${
+                          pinned ? "bg-sky-500/25 text-sky-300 border border-sky-400/30" : "bg-white/[0.08] text-gray-400 hover:bg-white/15"
+                        }`}
+                      >
+                        <IconPin active={pinned} />
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setMode("idle"); }}
+                        title="Collapse to top notch (Esc)"
+                        className="w-8 h-8 rounded-lg bg-white/[0.06] text-gray-400 flex items-center justify-center transition hover:bg-white/15 hover:text-white"
+                      >
+                        <IconClose />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Title */}
+                  <h2 className="text-[20px] font-bold tracking-tight text-white -mt-1 mb-1">Suggestions</h2>
+
+                  {/* Cards List */}
+                  <div className="flex-1 divide-y divide-white/[0.08] overflow-y-auto pr-0.5">
+                    {suggestions.map((card, i) => (
+                      <div key={i} className="py-2.5 flex items-center justify-between gap-3.5 group">
+                        <SuggestionIcon kind={card.icon} />
+                        <div className="flex-1 min-w-0">
+                          <div className="text-[13.5px] font-bold text-white leading-snug truncate">{card.title}</div>
+                          <div className="text-[11px] font-medium text-gray-400 mt-0.5">{card.meta}</div>
+                          {card.body && (
+                            <div className="text-[12px] text-gray-200/90 leading-snug mt-1 line-clamp-2">{card.body}</div>
+                          )}
+                        </div>
+                        <button
+                          onClick={() => handleSuggestionClick(card)}
+                          className="px-3.5 py-1.5 rounded-full bg-[#f1f5f9] hover:bg-white text-[#09090b] text-[11.5px] font-bold shrink-0 shadow transition transform active:scale-95"
+                        >
+                          {card.btn}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Footer */}
+                  <div className="pt-1.5 flex justify-center">
+                    <button
+                      onClick={() => setMode("chat")}
+                      className="text-[12px] font-semibold text-gray-400 hover:text-white transition"
+                    >
+                      Show more
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* VIEW 2: QUICK CHAT (Image 4) */}
+              {mode === "chat" && (
+                <div className="relative z-10 flex flex-col h-full px-5 pt-3.5 pb-4 justify-between">
+                  {/* Top Bar */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          if (bridgeRef.current && bridgeRef.current.requestSuggestions) {
+                            bridgeRef.current.requestSuggestions();
+                          }
+                          setMode("suggestions");
+                        }}
+                        title="Back to Suggestions"
+                        className="w-8 h-8 rounded-lg bg-white/[0.09] text-gray-200 flex items-center justify-center transition hover:bg-white/20"
+                      >
+                        <IconHome />
+                      </button>
+                      {messages.length > 0 && (
+                        <button
+                          onClick={() => { setMessages([]); setPendingToken(""); }}
+                          title="Clear view"
+                          className="px-2.5 h-7 rounded-lg bg-white/[0.06] text-[11px] font-medium text-gray-400 hover:text-white hover:bg-white/15 transition"
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+
+                    {autoSee && (
+                      <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/30 text-emerald-300 text-[10.5px] font-semibold">
+                        👁 Live Screen Vision ON
+                      </span>
+                    )}
+
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        onClick={() => setPinned(!pinned)}
+                        title={pinned ? "Pinned open" : "Pin overlay"}
+                        className={`w-8 h-8 rounded-lg flex items-center justify-center transition ${
+                          pinned ? "bg-sky-500/25 text-sky-300 border border-sky-400/30" : "bg-white/[0.08] text-gray-400 hover:bg-white/15"
+                        }`}
+                      >
+                        <IconPin active={pinned} />
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setMode("idle"); }}
+                        title="Collapse to top notch (Esc)"
+                        className="w-8 h-8 rounded-lg bg-white/[0.06] text-gray-400 flex items-center justify-center transition hover:bg-white/15 hover:text-white"
+                      >
+                        <IconClose />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Center Hero OR Active Conversation Feed */}
+                  {messages.length === 0 && !thinking ? (
+                    <div className="my-auto flex flex-col items-center justify-center text-center">
+                      <WizardMascot size={82} />
+                      <h2 className="text-[23px] font-bold tracking-tight text-white mt-2">
+                        Ready for a quick chat?
+                      </h2>
+                    </div>
+                  ) : (
+                    <div
+                      ref={chatScrollRef}
+                      className="flex-1 my-2.5 overflow-y-auto space-y-2.5 pr-1"
+                    >
+                      {messages.map((m, idx) => (
+                        <div
+                          key={idx}
+                          className={`flex flex-col ${
+                            m.role === "user" ? "items-end" : "items-start"
+                          }`}
+                        >
+                          <div
+                            className={`max-w-[90%] rounded-2xl px-3.5 py-2 text-[13px] leading-relaxed ${
+                              m.role === "user"
+                                ? "bg-sky-500/25 border border-sky-400/30 text-sky-100"
+                                : "bg-white/[0.07] border border-white/[0.1] text-gray-100 markdown-body"
+                            }`}
+                          >
+                            {m.role === "user" ? (
+                              <div>
+                                {m.sawScreen && (
+                                  <span className="inline-block mr-1.5 text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/30 text-emerald-200 font-semibold">
+                                    👁 Screen
+                                  </span>
+                                )}
+                                {m.text}
+                              </div>
+                            ) : (
+                              <div dangerouslySetInnerHTML={renderMarkdown(m.text)} />
+                            )}
+                          </div>
+                        </div>
+                      ))}
+
+                      {thinking && (
+                        <div className="flex items-center gap-2.5 px-3 py-2 rounded-2xl bg-white/[0.05] border border-white/[0.08] w-fit thinking-shimmer">
+                          <span className="w-2 h-2 rounded-full bg-sky-400 animate-ping" />
+                          <span className="text-[12px] text-gray-300 font-medium">
+                            JARVIS is thinking{autoSee ? " with live screen vision" : ""}...
+                          </span>
+                        </div>
+                      )}
+
+                      {pendingToken && !thinking && (
+                        <div className="flex justify-end pt-1">
+                          <button
+                            onClick={handleApprove}
+                            className="px-4 py-1.5 rounded-full bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-xs shadow-lg transition transform active:scale-95"
+                          >
+                            ✅ Approve Pending Action
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Bottom Stadium Input Pill (Image 4 exact layout) */}
+                  <div className="flex items-center gap-2.5 rounded-full bg-[#101218] border border-white/25 px-2 py-1.5 shadow-inner focus-within:border-white/45 transition">
+                    <button
+                      onClick={() => setAutoSee(!autoSee)}
+                      title={autoSee ? "Auto-See Screen ON (attaches live monitor screenshot)" : "Click to enable Auto-See Screen"}
+                      className={`w-9 h-9 rounded-full flex items-center justify-center text-lg font-medium shrink-0 transition transform active:scale-95 ${
+                        autoSee
+                          ? "bg-emerald-400 text-black shadow-[0_0_12px_rgba(52,211,153,0.6)]"
+                          : "bg-[#252830] text-gray-200 hover:bg-[#323642]"
+                      }`}
+                    >
+                      {autoSee ? "👁" : "+"}
+                    </button>
+
+                    <input
+                      ref={inputRef}
+                      type="text"
+                      value={query}
+                      onChange={(e) => setQuery(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          submitPrompt(query);
+                        }
+                      }}
+                      placeholder="Ask Jarvis anything"
+                      className="flex-1 bg-transparent text-[14px] text-white placeholder-gray-400 focus:outline-none px-1"
+                    />
+
+                    <button
+                      onClick={openVoiceMode}
+                      title="Voice Mode"
+                      className="w-9 h-9 rounded-full bg-white hover:bg-gray-200 text-black flex items-center justify-center shrink-0 shadow transition transform active:scale-95"
+                    >
+                      <IconMic />
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* VIEW 3: VOICE CLOUD ORB (Image 5) */}
+              {mode === "voice" && (
+                <div className="relative z-10 flex flex-col h-full items-center justify-between px-5 pt-3.5 pb-5">
+                  <div className="w-full flex justify-end">
+                    <button
+                      onClick={closeVoiceMode}
+                      title="Close Voice Mode"
+                      className="w-8 h-8 rounded-full bg-white/[0.07] border border-white/15 text-gray-200 flex items-center justify-center hover:bg-white/20 transition"
+                    >
+                      <IconClose />
+                    </button>
+                  </div>
+
+                  <div className="-mt-3 flex flex-col items-center">
+                    <VolumetricCloudOrb active={voiceActive} onClick={toggleOrbRecording} />
+                    <div className="mt-1 text-[16px] font-bold tracking-tight text-white">
+                      {voiceStatus}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<DynamicNotchApp />);
+  </script>
+</body>
+</html>

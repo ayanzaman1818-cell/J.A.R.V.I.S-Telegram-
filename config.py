@@ -61,16 +61,31 @@ ALLOWED_USER_IDS: set[int] = _parse_user_ids(env("ALLOWED_USER_IDS", ""))
 if OWNER_ID > 0:
     ALLOWED_USER_IDS.add(OWNER_ID)
 
+# Optional Native Telegram VoIP Calling (MTProto Userbot via py-tgcalls + Telethon)
+# Defaults to Telegram Desktop's official public API_ID/API_HASH if not overridden in .env.
+TELEGRAM_API_ID: int = env_int("TELEGRAM_API_ID", 2040)
+TELEGRAM_API_HASH: str = env("TELEGRAM_API_HASH", "b18441a1ff607e10a989891a5462e627")
+TELEGRAM_CALL_SESSION: Path = Path(
+    env("TELEGRAM_CALL_SESSION", str(BASE_DIR / "jarvis_call_userbot.session"))
+)
+if not TELEGRAM_CALL_SESSION.is_absolute():
+    TELEGRAM_CALL_SESSION = BASE_DIR / TELEGRAM_CALL_SESSION
+
 # --- Google Gemini ---
 GEMINI_API_KEY: str = env("GEMINI_API_KEY")
-LLM_MODEL: str = env("LLM_MODEL", "gemini-2.5-flash")
+LLM_MODEL: str = env("LLM_MODEL", "gemma-4-26b-a4b-it")
 LLM_FAST_MODEL: str = env("LLM_FAST_MODEL", LLM_MODEL)
 LLM_DEEP_MODEL: str = env("LLM_DEEP_MODEL", LLM_MODEL)
-LLM_FALLBACK_MODEL: str = env("LLM_FALLBACK_MODEL", "gemini-2.5-flash-lite")
+LLM_FALLBACK_MODEL: str = env("LLM_FALLBACK_MODEL", "gemini-3.5-flash-lite")
 
 LLM_TIMEOUT_SECONDS: int = max(5, env_int("LLM_TIMEOUT_SECONDS", 30))
+# When a fallback model exists, give the primary this long before switching over.
+LLM_PRIMARY_TIMEOUT_SECONDS: int = max(3, env_int("LLM_PRIMARY_TIMEOUT_SECONDS", 12))
 LLM_TEMPERATURE: float = max(0.0, min(env_float("LLM_TEMPERATURE", 0.4), 2.0))
 LLM_MAX_OUTPUT_TOKENS: int = max(256, env_int("LLM_MAX_OUTPUT_TOKENS", 2048))
+# Thinking level for routine vs complex turns ("LOW" or "MINIMAL" on routine turns, "MEDIUM" on complex queries).
+LLM_THINKING_LEVEL: str = env("LLM_THINKING_LEVEL", "LOW").upper()
+LLM_DEEP_THINKING_LEVEL: str = env("LLM_DEEP_THINKING_LEVEL", "MEDIUM").upper()
 GEMINI_RETRY_ATTEMPTS: int = max(1, min(env_int("GEMINI_RETRY_ATTEMPTS", 2), 3))
 GEMINI_FALLBACK_RETRIES: int = max(1, min(env_int("GEMINI_FALLBACK_RETRIES", 2), 3))
 MAX_TOOL_STEPS: int = max(1, min(env_int("MAX_TOOL_STEPS", 6), 15))
@@ -87,6 +102,17 @@ PROACTIVE_ALERTS: bool = flag("PROACTIVE_ALERTS", "true")
 BATTERY_ALERT_THRESHOLD: int = max(5, min(env_int("BATTERY_ALERT_THRESHOLD", 20), 95))
 QUIET_HOURS_START: str = env("QUIET_HOURS_START", "22:00")
 QUIET_HOURS_END: str = env("QUIET_HOURS_END", "07:00")
+
+# Autonomous Self-Study / Student Mode
+AUTO_STUDY_ENABLED: bool = flag("AUTO_STUDY_ENABLED", "true")
+AUTO_STUDY_INTERVAL_HOURS: int = max(1, min(env_int("AUTO_STUDY_INTERVAL_HOURS", 6), 48))
+AUTO_STUDY_NOTIFY: bool = flag("AUTO_STUDY_NOTIFY", "false")
+
+# Desktop Companion Overlay & Computer-Use
+DESKTOP_OVERLAY_ENABLED: bool = flag("DESKTOP_OVERLAY_ENABLED", "false")
+DESKTOP_OVERLAY_HOTKEY: str = env("DESKTOP_OVERLAY_HOTKEY", "ctrl+alt+space")
+DESKTOP_AUTO_SEE_DEFAULT: bool = flag("DESKTOP_AUTO_SEE_DEFAULT", "false")
+DESKTOP_VOICE_REPLY: bool = flag("DESKTOP_VOICE_REPLY", "false")
 
 # --- Voice & Calls ---
 GROQ_API_KEY: str = env("GROQ_API_KEY")
@@ -110,8 +136,12 @@ TWILIO_SID: str = env("TWILIO_ACCOUNT_SID")
 TWILIO_TOKEN: str = env("TWILIO_AUTH_TOKEN")
 TWILIO_NUMBER: str = env("TWILIO_NUMBER")
 MY_PHONE: str = env("MY_PHONE")
-TWILIO_VOICE: str = env("TWILIO_VOICE", "alice")
+TWILIO_VOICE: str = env("TWILIO_VOICE", "Polly.Brian")
 TWILIO_WEBHOOK_URL: str = env("TWILIO_WEBHOOK_URL")
+TWILIO_WEBHOOK_HOST: str = env("TWILIO_WEBHOOK_HOST", "0.0.0.0")
+TWILIO_WEBHOOK_PORT: int = max(1, min(env_int("TWILIO_WEBHOOK_PORT", 8787), 65535))
+TWILIO_WEBHOOK_ENABLED: bool = flag("TWILIO_WEBHOOK_ENABLED", "true")
+TWILIO_USE_CUSTOM_TTS: bool = flag("TWILIO_USE_CUSTOM_TTS", "true")
 
 # --- Composio Integrations & Knowledge ---
 COMPOSIO_API_KEY: str = env("COMPOSIO_API_KEY")
@@ -140,6 +170,13 @@ if not LOG_FILE.is_absolute():
     LOG_FILE = BASE_DIR / LOG_FILE
 
 LOG_LEVEL: str = env("LOG_LEVEL", "INFO").upper()
+
+# --- Backups ---
+BACKUP_DIR: Path = Path(env("BACKUP_DIR", str(BASE_DIR / "backups")))
+if not BACKUP_DIR.is_absolute():
+    BACKUP_DIR = BASE_DIR / BACKUP_DIR
+BACKUP_TIME: str = env("BACKUP_TIME", "03:30")
+BACKUP_KEEP: int = max(1, min(env_int("BACKUP_KEEP", 7), 90))
 
 
 def get_zoneinfo() -> ZoneInfo:
@@ -198,7 +235,17 @@ def redact_secrets(text: str) -> str:
             cleaned = cleaned.replace(secret, "[REDACTED]")
     cleaned = re.sub(r"(key=)[^&\s\"']+", r"\1[REDACTED]", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"bot\d+:[A-Za-z0-9_-]+", "bot[REDACTED]", cleaned)
+    # Bare Telegram bot tokens (e.g. in "token `123:ABC...` was rejected" errors),
+    # including old/revoked tokens that no longer match TELEGRAM_TOKEN.
+    cleaned = re.sub(r"\b\d{6,12}:[A-Za-z0-9_-]{30,}\b", "[REDACTED_BOT_TOKEN]", cleaned)
     return cleaned
+
+
+class RedactingFormatter(logging.Formatter):
+    """Formatter that also scrubs secrets from rendered tracebacks (exc_info / stack_info)."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return redact_secrets(super().format(record))
 
 
 class SecretRedactingFilter(logging.Filter):
@@ -230,7 +277,7 @@ def setup_logging() -> logging.Logger:
     level = getattr(logging, LOG_LEVEL, logging.INFO)
     root.setLevel(level)
 
-    formatter = logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s")
+    formatter = RedactingFormatter("%(asctime)s %(name)s %(levelname)s %(message)s")
     redactor = SecretRedactingFilter()
 
     console_handler = logging.StreamHandler()

@@ -3,6 +3,9 @@
 *.env
 *.pem
 *.key
+*.session
+*.session-*
+telegram_qr_login.html
 
 # SQLite database & local logs
 *.db
@@ -10,6 +13,7 @@
 *.db-wal
 *.db-shm
 *.log
+*.log.*
 
 # Python cache & build
 __pycache__/
@@ -34,6 +38,7 @@ jarvis_rebuild/
 scratch/
 inbox/
 notes/
+backups/
 $RECYCLE.BIN/
 System Volume Information/
 .vscode/

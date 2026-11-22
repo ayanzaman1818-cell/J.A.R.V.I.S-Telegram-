@@ -167,7 +167,8 @@ async def archive_article(
 ) -> str:
     import trafilatura
 
-    raw_html = await safe_get(url)
+    resp = await safe_get(url)
+    raw_html = resp.text if hasattr(resp, "text") else str(resp)
     extracted = trafilatura.extract(
         raw_html, include_links=True, output_format="txt"
     ) or raw_html[:4000]
@@ -288,3 +289,31 @@ async def delete_note(ctx: ToolContext, note_id: int) -> str:
     if db.delete_knowledge_note(note_id, user_id=ctx.user_id):
         return f"Deleted Second Brain note #{note_id}."
     return f"Note #{note_id} not found."
+
+
+def quick_knowledge_context(query: str, user_id: int | None = None, limit: int = 2) -> str:
+    """Fast zero-network lexical recall of top matching Second Brain notes for automatic prompt injection."""
+    q = (query or "").strip()
+    if len(q) < 4:
+        return ""
+    notes = db.list_knowledge_notes(limit=80, user_id=user_id)
+    if not notes:
+        return ""
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for n in notes:
+        score = _lexical_score(
+            q,
+            str(n.get("title", "")),
+            str(n.get("content", "")),
+            str(n.get("tags", "")),
+        )
+        if score >= 0.45:
+            scored.append((score, n))
+    if not scored:
+        return ""
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    lines = []
+    for _, it in scored[:limit]:
+        snippet = str(it.get("content", "")).strip().replace("\n", " ")[:360]
+        lines.append(f"- [Note #{it['id']} {it['title']}]: {snippet}")
+    return "\n".join(lines)

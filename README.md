@@ -415,7 +415,17 @@ Press `Ctrl+C` in the terminal to stop Jarvis.
 - **Daily Morning & Evening Debriefings:**
   - **Morning Briefing (`/briefing`):** Weather forecast, appointments, unread VIP emails, pending reminders, 7-day finances, and top tech news.
   - **Evening Wrap-Up (`/evening`):** End-of-day reflection at 9:30 PM summarizing checked-off tasks, today's logged expenses & habits, and tomorrow's upcoming events.
-- **PC Desktop Remote Control & Clipboard Sync:**
+- **Desktop Companion Floating Overlay & Computer-Use ([services/desktop_overlay.py](file:///g:/jarvis/services/desktop_overlay.py), [tools/desktop.py](file:///g:/jarvis/tools/desktop.py)):**
+  - **Global Hotkey Translucent Command Bar (`DESKTOP_OVERLAY_ENABLED=true`):** Toggle an always-on-top floating command bar from anywhere on your PC with `Ctrl+Alt+Space` or `Ctrl+/`. Shares the exact same Gemini Brain, SQLite memory, tasks, and tools as your Telegram chat (`OWNER_ID`).
+  - **Auto-See Screen & Push-to-Talk Voice:** Includes a single-line prompt (`Enter` to submit, `Esc` to hide), an **👁 Auto-See Screen** switch that attaches a live monitor screenshot automatically, a **🎙 Push-to-Talk** microphone button wired to Groq Whisper STT + TTS playback, and an inline `✅ Approve Pending Action` button.
+  - **Real-Time Screen Vision (`see_screen`):** Captures the primary monitor or active window via `mss` and `Pillow` as a resized JPEG (max 1600px width, quality 80) and feeds the raw image bytes directly into Gemini's multimodal pipeline mid-task to verify UI state.
+  - **Native GUI Computer-Use Automation (`desktop_list_windows`, `desktop_focus_window`, `desktop_click`, `desktop_type`, `desktop_hotkey`, `desktop_scroll`):** Built on `pyautogui` (`FAILSAFE=True` at `(0, 0)`, `PAUSE=0.15`) and `pygetwindow`, with strict credential/password blocking and `pending_actions` confirmation tokens before form submissions, destructive hotkeys, or system settings changes.
+- **PC Desktop Remote Control & Workstation Automation ([tools/pc_control.py](file:///g:/jarvis/tools/pc_control.py)):**
+  - **Smart Window Capture & AI Screen Inspector (`pc_inspect_window`, `pc_screenshot`):** Automatically minimizes Telegram for 300ms when capturing on the same PC (or targets a specific background window by title like `"Visual Studio Code"`) and pipes the screenshot directly into Gemini Vision to debug errors on your screen.
+  - **Window & Process Manager (`/top`, `pc_list_windows`, `pc_window_control`, `pc_top_processes`, `pc_kill_process`):** List or focus/minimize/maximize/close open desktop windows, view top RAM-heavy processes, and terminate frozen processes with one-tap `🛑 Kill` buttons.
+  - **Power, Display & Keep-Awake Automation (`pc_power_control`, `pc_stay_awake`):** Turn off monitors (`display_off`), sleep, hibernate, schedule/cancel shutdown or restart, and toggle Windows Caffeine / Keep-Awake mode so your PC never sleeps during long renders or downloads.
+  - **Direct URL-to-PC Downloader & Downloads Organizer (`/download`, `pc_download_url`, `pc_organize_downloads`):** Download any URL directly into your PC's `Downloads` folder and auto-sort cluttered files into `Images/`, `Documents/`, `Archives/`, `Installers/`, `Code/`, and `Media/`.
+  - **Workstation Diagnostics, Network Info & Physical PC Alerts (`pc_network_info`, `pc_run_diagnostic`, `pc_notify`, `pc_speak_aloud`):** Inspect LAN IP & Wi-Fi SSID/signal, run allowlisted dev diagnostics (`git_status`, `docker_ps`, `gpu_nvidia_smi`, `netstat_listening`), pop native desktop notifications, or speak aloud through your PC's physical speakers.
   - **Two-Way Clipboard Sync:** Read PC clipboard text into Telegram or copy text/URLs directly to your PC clipboard (`/clip <text>`).
   - **Focus & Environment Modes:** Activate desktop presets (`/pc` or natural language): `work` (opens VS Code + Spotify), `night` (mutes media + locks PC), `chill` (Spotify playback), and `meeting` (instant mute).
   - **Remote File Transfers & Inbox:** List files in Downloads/Desktop/Documents, send PC files to Telegram, or send any photo/document to Telegram with caption `/save` to store it directly in `inbox/`.
@@ -423,7 +433,17 @@ Press `Ctrl+C` in the terminal to stop Jarvis.
 - **Second Brain Knowledge Vault (RAG & Read-Later):**
   - **Semantic + Keyword Hybrid Search:** Search saved notes, code snippets, and local markdown files in `notes/` using Gemini vector embeddings and SQLite.
   - **"Read Later" Web Article Archiver:** Forward any article URL (`archive_article`) to extract clean readable text, generate an executive summary, and save it in your Second Brain vault.
+- **Autonomous Agentic Workflows ([tools/agentic.py](file:///g:/jarvis/tools/agentic.py), [tools/student.py](file:///g:/jarvis/tools/student.py), [brain/agent.py](file:///g:/jarvis/brain/agent.py)):**
+  - **Autonomous Student / Self-Learning Engine (`/study`, `enroll_study_topic`, `study_next_lesson`):** JARVIS continuously learns on the web like a student. In background study sessions (`AUTO_STUDY_INTERVAL_HOURS=6`), JARVIS either progresses through enrolled subjects across 5 Mastery Levels (`Level 1: Foundations` → `Level 5: Frontier Research`) or **autonomously discovers new topics** from your interests, tasks, and live Hacker News frontiers. Each lesson searches the web, reads full articles, writes structured **Student Study Notes + Self-Test Flashcards** into your Second Brain vault, and queues its own next curiosity question (`NEXT_SUBTOPIC`).
+  - **Deep Research Agent (`/research <topic>`, `deep_research`):** Fans out across multiple search angles concurrently, reads authoritative web pages in parallel, synthesizes a cited executive research report, and archives it to your Second Brain vault.
+  - **Goal & Project Decomposition Planner (`/plan <goal>`, `plan_goal`):** Decomposes high-level goals into prioritized milestones with due dates, populates your SQLite task inbox automatically, and saves a master roadmap note.
+  - **Scheduled Autonomous Background Jobs / Standing Orders (`/automate`, `schedule_agent_job`):** Schedule future or recurring (`daily`, `weekdays`, `weekly`, `monthly`) prompts where JARVIS wakes up autonomously, executes live tools (web search, PC status, Hacker News, tasks, weather), and messages you the synthesized report.
+  - **Parallel Multi-Tool ReAct Execution & Proactive RAG Recall:** Executes multiple independent tool calls concurrently via `asyncio.gather` and automatically injects top-matching Second Brain notes into the system prompt on every turn.
 - **Automated Price-Drop Watchdog:** Monitor product URLs (`watch_price`, `/watch`) and receive instant Telegram deal alerts when prices drop to or below your target threshold.
+- **Pomodoro & Deep Focus Timers (`/focus`):** Start quick 25m Pomodoro, 50m Deep Work, or 5m Break countdown sessions (`start_focus_timer`) with persistent SQLite reminder delivery.
+- **One-Tap CSV & Markdown Data Export (`/export`):** Export your expenses, tasks, habits, or Second Brain knowledge vault notes directly in Telegram as downloadable `.csv` or `.md` files (`export_data`).
+- **Rich Recurring Reminders:** Schedule persistent reminders repeating `daily`, `weekdays` (Monday–Friday), `weekly`, or `monthly` (with automatic month-end clamping).
+- **Automated Online SQLite Backups & Live Health Diagnostics (`/backup`, `/health`):** Nightly online SQLite database backups (`03:30` local time) with `PRAGMA integrity_check` verification and rolling retention, plus `/health` live diagnostics for model latency, adaptive circuit-breaker state, voice status, and network metrics.
 - **Vision & Document Analysis:** Send photos, receipts, or PDF/text files in Telegram with an optional caption to analyze bills, debug code screenshots, or summarize research papers.
 - **YouTube Video Summarizer:** Paste any YouTube link (including Shorts) to extract timestamped transcripts and generate comprehensive summaries.
 - **Spotify & Desktop Media Control:** Inspect currently playing track, toggle play/pause, skip tracks, adjust volume, or search and launch tracks in Spotify.
@@ -436,19 +456,29 @@ Press `Ctrl+C` in the terminal to stop Jarvis.
 | `/start`, `/help` | Display welcome guide and available commands |
 | `/voicemode`, `/voice` | Toggle two-way voice chat mode, test voices, or play MCU sound clips |
 | `/status` | Check system health, active voice engine, models, and database counts |
+| `/health`, `/diag` | Live diagnostics: uptime, model circuit breaker & latency, Fish Audio, backups |
+| `/backup [send]` | Run an online SQLite backup now (`send` delivers the `.db` file to Telegram) |
 | `/model` | Inspect active Gemini models and circuit-breaker status |
 | `/briefing` | Generate and deliver your on-demand morning briefing |
 | `/evening` | Generate and deliver your 9:30 PM evening reflection & wrap-up |
 | `/tasks` | List open tasks with one-tap `✅ Done` inline buttons |
+| `/plan <goal>` | Autonomously decompose a goal into tasks and save a Second Brain roadmap |
+| `/research <topic>` | Run autonomous multi-query web research and archive the cited report |
+| `/study [now\|quiz\|<subject>]` | Autonomous Student Mode: self-study on the web, syllabus, & flashcard review (`/learn`) |
+| `/automate [when \| prompt]` | Schedule or list standing autonomous background agent jobs (`/jobs`) |
+| `/focus [mins] [task]` | Start a Pomodoro / deep focus countdown timer (25m, 50m, 5m presets) |
 | `/reminders` | List pending reminders with one-tap `❌ Cancel` inline buttons |
 | `/expenses` | View 30-day expense breakdown with `📊 Generate Expense Chart` button |
 | `/habits`, `/stats` | View habit streaks and 7-day stats with `🔥 Habit Streak Chart` button |
 | `/notes [query]`, `/brain` | Search or list notes and articles in your Second Brain knowledge vault |
+| `/export [dataset]` | Export `expenses`, `tasks`, `habits`, or `notes` as a CSV or Markdown file |
 | `/watch` | List and manage active product price-drop watches |
 | `/pc`, `/pcstatus` | Check live PC CPU, RAM, disk, battery, and quick remote control buttons |
+| `/top` | List top memory-consuming PC processes with one-tap `🛑 Kill` inline buttons |
+| `/download <url>` | Download any public file URL directly to your PC's `Downloads` folder |
 | `/clip [text]` | Read PC clipboard, or copy `<text>` to your PC clipboard |
 | `/lock` | Immediately lock your Windows workstation (owner only) |
-| `/memory` | Inspect stored long-term memories and user preferences |
+| `/memory` | Inspect stored long-term memories and user preferences |py 
 | `/call <message>` | Ring your phone with a spoken message via Twilio (owner only) |
 | `/reset`, `/clear` | Clear current short-term conversation context |
 | `/myid` | Display your numeric Telegram user ID |

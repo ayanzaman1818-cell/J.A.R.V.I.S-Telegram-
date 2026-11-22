@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from tools import (
+    agentic,
     browser,
     charts,
     comms,
+    desktop,
     integrations,
     knowledge,
     memory_tools,
@@ -13,6 +15,7 @@ from tools import (
     pc_control,
     productivity,
     spotify,
+    student,
     tracker,
     watchdog,
     web,
@@ -38,6 +41,7 @@ __all__ = [
     "MAX_TOOL_CHARS",
     "REGISTRY",
     "ToolContext",
+    "agentic",
     "browser",
     "charts",
     "check_url_safe",
@@ -45,6 +49,7 @@ __all__ = [
     "close_browser",
     "comms",
     "composio_enabled",
+    "desktop",
     "integrations",
     "knowledge",
     "load_memory",
@@ -57,6 +62,7 @@ __all__ = [
     "safe_get",
     "schemas",
     "spotify",
+    "student",
     "tool",
     "tracker",
     "validate_args",

@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine
 
 log = logging.getLogger("jarvis.tools")
 
 MAX_TOOL_CHARS = 2500
+TOOL_TIMEOUT_SECONDS = 45.0
 REGISTRY: dict[str, dict[str, Any]] = {}
 
 
@@ -21,6 +23,18 @@ class ToolContext:
     chat_id: int = 0
     job_queue: Any = None
     user_id: int | None = None
+    pending_media: list[tuple[bytes, str]] = field(default_factory=list)
+
+    def attach_media(self, data: bytes, mime_type: str = "image/jpeg") -> None:
+        """Queue raw media bytes (e.g. from see_screen) for the next multimodal LLM turn."""
+        if data:
+            self.pending_media.append((bytes(data), mime_type))
+
+    def consume_media(self) -> list[tuple[bytes, str]]:
+        """Pop and return all media queued during the current tool execution step."""
+        items = list(self.pending_media)
+        self.pending_media.clear()
+        return items
 
 
 # Alias for backward compatibility
@@ -164,7 +178,13 @@ async def run_tool(ctx: ToolContext, name: str, args: Any) -> str:
         return f"Invalid arguments for {name}: {err}"
 
     try:
-        out = await entry["fn"](ctx, **validated)
+        out = await asyncio.wait_for(
+            entry["fn"](ctx, **validated),
+            timeout=TOOL_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        log.warning("Tool execution timed out after %.0fs: tool=%s", TOOL_TIMEOUT_SECONDS, name)
+        out = f"Tool error (TimeoutError): '{name}' timed out after {int(TOOL_TIMEOUT_SECONDS)}s."
     except Exception as exc:
         log.warning("Tool execution failed: tool=%s error=%s", name, type(exc).__name__, exc_info=True)
         out = f"Tool error ({type(exc).__name__}): {exc}"

@@ -91,11 +91,47 @@ async def jarvis_voice_clip(
 
 @tool(
     "call_me",
-    "Phone the user right now and read a short message aloud. Use when asked to call, "
-    "or for genuinely urgent things. One-way: the user cannot reply on the call.",
-    {"message": {"type": "string", "description": "What to say. Keep it short."}},
+    "Ring the user right now with a real Native 1-on-1 Telegram VoIP Call (if JARVIS's Telegram Call account is logged in) or a live two-way voice call link. Use when asked to call, or for urgent alerts.",
+    {"message": {"type": "string", "description": "What to say when the user picks up. Keep it concise."}},
     ["message"],
 )
 async def call_me(ctx: ToolContext, message: str) -> str:
-    sid = await voice.phone_call(message)
-    return f"Calling now (call id {sid})."
+    from services.telegram_call import is_native_call_configured, place_native_telegram_call
+
+    if is_native_call_configured():
+        try:
+            res = await place_native_telegram_call(
+                target_user_id=ctx.user_id,
+                greeting=message,
+            )
+            return res
+        except Exception:
+            pass
+
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    from services.twilio_webhook import get_web_call_url, start_twilio_webhook_server
+
+    await start_twilio_webhook_server(bot=ctx.bot, job_queue=ctx.job_queue)
+    call_url = get_web_call_url(greeting=message)
+
+    if ctx.bot and ctx.chat_id:
+        markup = (
+            InlineKeyboardMarkup(
+                [[InlineKeyboardButton("📞 Answer Live Voice Call with JARVIS", url=call_url)]]
+            )
+            if call_url.startswith("https://")
+            else None
+        )
+        await ctx.bot.send_message(
+            ctx.chat_id,
+            f"📞 Incoming Live Voice Call from J.A.R.V.I.S.:\n\"{message}\"\n\n{call_url}",
+            reply_markup=markup,
+        )
+
+    if voice.calls_enabled():
+        try:
+            sid = await voice.phone_call(message)
+            return f"Sent Live Voice Call button and rang phone via Twilio (call id {sid})."
+        except Exception:
+            pass
+    return f"Sent Live 2-Way Voice Call link to Telegram ({call_url})."

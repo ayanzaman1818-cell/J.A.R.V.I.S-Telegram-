@@ -22,8 +22,119 @@ class ComposioUnavailable(RuntimeError):
     pass
 
 
+# Connectable Composio apps surfaced in the Desktop Overlay Connections tab & Telegram
+POPULAR_COMPOSIO_APPS: list[dict[str, str]] = [
+    {
+        "toolkit": "notion",
+        "name": "Notion",
+        "icon": "prism",
+        "desc": "Connect Notion workspaces, pages, and databases.",
+    },
+    {
+        "toolkit": "slack",
+        "name": "Slack",
+        "icon": "cloud",
+        "desc": "Read channels, search messages, and send Slack updates.",
+    },
+    {
+        "toolkit": "discord",
+        "name": "Discord",
+        "icon": "cloud",
+        "desc": "Connect Discord servers, channels, and messages.",
+    },
+    {
+        "toolkit": "github",
+        "name": "GitHub",
+        "icon": "prism",
+        "desc": "Repositories, issues, pull requests, and commits.",
+    },
+    {
+        "toolkit": "spotify",
+        "name": "Spotify",
+        "icon": "cloud",
+        "desc": "Control playback, playlists, and saved tracks.",
+    },
+    {
+        "toolkit": "linear",
+        "name": "Linear",
+        "icon": "prism",
+        "desc": "Track engineering issues, cycles, and project roadmaps.",
+    },
+    {
+        "toolkit": "trello",
+        "name": "Trello",
+        "icon": "calendar",
+        "desc": "Manage Trello boards, lists, and project cards.",
+    },
+    {
+        "toolkit": "outlook",
+        "name": "Microsoft Outlook",
+        "icon": "calendar",
+        "desc": "Read and send Outlook emails and calendar events.",
+    },
+    {
+        "toolkit": "youtube",
+        "name": "YouTube",
+        "icon": "prism",
+        "desc": "Manage channels, playlists, and video subscriptions.",
+    },
+    {
+        "toolkit": "figma",
+        "name": "Figma",
+        "icon": "prism",
+        "desc": "Inspect Figma design files, components, and comments.",
+    },
+    {
+        "toolkit": "jira",
+        "name": "Jira",
+        "icon": "calendar",
+        "desc": "Track Jira issues, sprints, and engineering projects.",
+    },
+    {
+        "toolkit": "todoist",
+        "name": "Todoist",
+        "icon": "calendar",
+        "desc": "Sync personal tasks, projects, and productivity labels.",
+    },
+    {
+        "toolkit": "dropbox",
+        "name": "Dropbox",
+        "icon": "cloud",
+        "desc": "Access, search, and manage cloud files in Dropbox.",
+    },
+    {
+        "toolkit": "gmail",
+        "name": "Gmail",
+        "icon": "cloud",
+        "desc": "Read, search, draft, and send emails.",
+    },
+    {
+        "toolkit": "googlecalendar",
+        "name": "Google Calendar",
+        "icon": "calendar",
+        "desc": "Sync meetings, daily schedule, and availability.",
+    },
+    {
+        "toolkit": "googledrive",
+        "name": "Google Drive",
+        "icon": "prism",
+        "desc": "Search files, docs, and save notes to Google Drive.",
+    },
+]
+
+# Dynamic in-memory cache of active Composio connected account IDs (slug -> ca_xxx)
+_CONNECTED_ACCOUNTS_CACHE: dict[str, str] = {}
+_CACHE_TS: float = 0.0
+
+
 def composio_enabled() -> bool:
     return bool(config.COMPOSIO_API_KEY) and not config.COMPOSIO_API_KEY.startswith("ck_")
+
+
+def _effective_user_id() -> str:
+    if config.COMPOSIO_USER_ID:
+        return config.COMPOSIO_USER_ID
+    return f"jarvis-owner-{config.OWNER_ID or 1}"
 
 
 @lru_cache(maxsize=1)
@@ -43,22 +154,98 @@ def _client():
         raise ComposioUnavailable(
             "Composio SDK is not installed. Run: pip install -r requirements.txt"
         ) from exc
-    return Composio(
-        api_key=config.COMPOSIO_API_KEY,
-        toolkit_versions={
-            "gmail": "latest",
-            "googledrive": "latest",
-            "googlecalendar": "latest",
-        },
-    )
+    return Composio(api_key=config.COMPOSIO_API_KEY)
+
+
+def get_connected_toolkits_sync(force_refresh: bool = False) -> dict[str, str]:
+    """Return a mapping of {toolkit_slug: connected_account_id} for all ACTIVE Composio connections.
+    Automatically discovers new connections from Composio cloud and SQLite preferences without requiring .env edits!
+    """
+    import time
+
+    global _CONNECTED_ACCOUNTS_CACHE, _CACHE_TS
+    now = time.time()
+    if not force_refresh and _CONNECTED_ACCOUNTS_CACHE and (now - _CACHE_TS < 45.0):
+        return dict(_CONNECTED_ACCOUNTS_CACHE)
+
+    mapping: dict[str, str] = {}
+    # 1. Seed with any legacy .env overrides if present
+    if config.COMPOSIO_GMAIL_ACCOUNT:
+        mapping["gmail"] = config.COMPOSIO_GMAIL_ACCOUNT
+    if config.COMPOSIO_GOOGLEDRIVE_ACCOUNT:
+        mapping["googledrive"] = config.COMPOSIO_GOOGLEDRIVE_ACCOUNT
+    if config.COMPOSIO_GOOGLECALENDAR_ACCOUNT:
+        mapping["googlecalendar"] = config.COMPOSIO_GOOGLECALENDAR_ACCOUNT
+
+    # 2. Load any saved connected account IDs from SQLite preferences
+    try:
+        prefs = db.list_preferences(user_id=config.OWNER_ID or None)
+        for k, v in prefs.items():
+            if k.startswith("composio_ca_") and v:
+                slug = k[len("composio_ca_") :].lower()
+                mapping[slug] = v
+    except Exception:
+        pass
+
+    # 3. Query Composio cloud live for all ACTIVE connected accounts on this project/user
+    if composio_enabled():
+        try:
+            uid = _effective_user_id()
+            resp = _client().connected_accounts.list(
+                user_ids=[uid], statuses=["ACTIVE"]
+            )
+            for item in getattr(resp, "items", []) or []:
+                ca_id = getattr(item, "id", "") or ""
+                tk_obj = getattr(item, "toolkit", None)
+                slug = (getattr(tk_obj, "slug", "") or "").lower()
+                if slug and ca_id:
+                    mapping[slug] = ca_id
+                    try:
+                        db.set_preference(
+                            f"composio_ca_{slug}", ca_id, user_id=config.OWNER_ID or None
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            log.debug("Composio live connected_accounts.list lookup skipped", exc_info=True)
+
+    _CONNECTED_ACCOUNTS_CACHE = mapping
+    _CACHE_TS = now
+    return dict(mapping)
+
+
+def authorize_toolkit_sync(toolkit: str) -> dict[str, str]:
+    """Initiate a 1-click Composio v3 OAuth flow (POST /api/v3/connected_accounts/link) for ANY toolkit
+    (gmail, github, notion, slack, discord, linear, etc.) and return {'toolkit': slug, 'redirect_url': url, 'connected_account_id': id}.
+    No .env edits required!
+    """
+    slug = re.sub(r"[^a-z0-9_-]", "", (toolkit or "").strip().lower())
+    if not slug:
+        raise ValueError("Toolkit slug is required (e.g. 'gmail', 'github', 'notion', 'slack').")
+    client = _client()
+    uid = _effective_user_id()
+    auth_config_id = client.toolkits._get_auth_config_id(toolkit=slug)
+    try:
+        req = client.connected_accounts.link(
+            user_id=uid,
+            auth_config_id=auth_config_id,
+            allow_multiple=True,
+        )
+    except Exception:
+        req = client.toolkits.authorize(user_id=uid, toolkit=slug)
+    ca_id = getattr(req, "id", "") or ""
+    redirect_url = getattr(req, "redirect_url", "") or ""
+    return {
+        "toolkit": slug,
+        "connected_account_id": ca_id,
+        "redirect_url": redirect_url,
+    }
 
 
 def _account(toolkit: str) -> str | None:
-    return {
-        "gmail": config.COMPOSIO_GMAIL_ACCOUNT,
-        "googledrive": config.COMPOSIO_GOOGLEDRIVE_ACCOUNT,
-        "googlecalendar": config.COMPOSIO_GOOGLECALENDAR_ACCOUNT,
-    }.get(toolkit) or None
+    slug = (toolkit or "").strip().lower()
+    active_map = get_connected_toolkits_sync(force_refresh=False)
+    return active_map.get(slug)
 
 
 def _execute_sync(toolkit: str, slug: str, arguments: dict[str, Any]):
@@ -66,9 +253,8 @@ def _execute_sync(toolkit: str, slug: str, arguments: dict[str, Any]):
         "slug": slug,
         "arguments": arguments,
         "dangerously_skip_version_check": True,
+        "user_id": _effective_user_id(),
     }
-    if config.COMPOSIO_USER_ID:
-        kwargs["user_id"] = config.COMPOSIO_USER_ID
     account = _account(toolkit)
     if account:
         kwargs["connected_account_id"] = account
@@ -372,8 +558,8 @@ async def calendar_prepare_event(
 
 @tool(
     "confirm_action",
-    "Execute the single pending email send, Drive file creation, or Calendar event creation "
-    "only after the user explicitly says yes. Pass the exact confirmation token.",
+    "Execute the single pending email send, Drive file creation, Calendar event creation, "
+    "or confirmed desktop computer-use action only after the user explicitly says yes. Pass the exact confirmation token.",
     {"token": {"type": "string"}},
     ["token"],
 )
@@ -392,4 +578,125 @@ async def confirm_action(ctx: ToolContext, token: str) -> str:
         return await execute(
             "googlecalendar", "GOOGLECALENDAR_CREATE_EVENT", pending.payload
         )
+    if kind.startswith("desktop_"):
+        from tools.desktop import execute_confirmed_desktop_action
+
+        return await execute_confirmed_desktop_action(kind, pending.payload)
+    if kind == "composio_exec":
+        return await execute(
+            str(pending.payload.get("toolkit", "")),
+            str(pending.payload.get("tool_slug", "")),
+            dict(pending.payload.get("arguments") or {}),
+        )
     return "Unknown pending action."
+
+
+# ---------------------------------------------------------------- Universal Composio Bridge
+@tool(
+    "composio_list_connections",
+    "List all connected and available external app integrations bridged via Composio (Gmail, Google Calendar, Google Drive, GitHub, Notion, Slack, Discord, Linear, etc.) without needing any extra API keys in .env.",
+)
+async def composio_list_connections(ctx: ToolContext) -> str:
+    if not composio_enabled():
+        return "Composio is not configured. Set COMPOSIO_API_KEY in .env once to unlock 250+ app integrations."
+    active = await asyncio.to_thread(get_connected_toolkits_sync, True)
+    lines = ["🔌 **Composio Universal Integration Bridge**"]
+    seen: set[str] = set()
+    for app in POPULAR_COMPOSIO_APPS:
+        tk = app["toolkit"]
+        seen.add(tk)
+        ca_id = active.get(tk)
+        status = f"✅ Connected ({ca_id})" if ca_id else "⚪ Not connected (1-click OAuth ready)"
+        lines.append(f"- **{app['name']}** (`{tk}`): {status} — {app['desc']}")
+    for tk, ca_id in sorted(active.items()):
+        if tk not in seen:
+            lines.append(f"- **{tk.title()}** (`{tk}`): ✅ Connected ({ca_id})")
+    lines.append(
+        "\nTo connect any new service (e.g. GitHub, Notion, Slack, Discord, Trello, Jira, Spotify, Outlook), "
+        "call `composio_connect_app(toolkit='<name>')` for an instant browser OAuth link — no .env changes needed!"
+    )
+    return "\n".join(lines)
+
+
+@tool(
+    "composio_connect_app",
+    "Connect any external service or app (e.g. 'github', 'notion', 'slack', 'discord', 'linear', 'gmail', 'googlecalendar', 'googledrive', 'outlook', 'spotify', 'trello') via Composio 1-click OAuth. No API keys or .env edits needed.",
+    {
+        "toolkit": {
+            "type": "string",
+            "description": "Toolkit slug to connect (e.g. 'github', 'notion', 'slack', 'discord', 'linear', 'gmail').",
+        },
+        "open_browser": {
+            "type": "boolean",
+            "description": "If True (default), also opens the OAuth login URL directly on the user's PC browser.",
+        },
+    },
+    ["toolkit"],
+)
+async def composio_connect_app(
+    ctx: ToolContext, toolkit: str, open_browser: bool = True
+) -> str:
+    if not composio_enabled():
+        return "Composio is not configured. Add your single COMPOSIO_API_KEY to .env."
+    try:
+        info = await asyncio.to_thread(authorize_toolkit_sync, toolkit)
+    except Exception as exc:
+        return f"Could not initiate Composio connection for '{toolkit}': {exc}"
+
+    url = info.get("redirect_url") or ""
+    ca_id = info.get("connected_account_id") or ""
+    slug = info.get("toolkit") or toolkit
+    if open_browser and url:
+        try:
+            import webbrowser
+
+            webbrowser.open(url)
+        except Exception:
+            pass
+    return (
+        f"🔗 **Connect {slug.title()} via Composio**\n"
+        f"- Account slot: `{ca_id}`\n"
+        f"- OAuth Link: {url}\n\n"
+        "Complete the login in your browser and JARVIS will automatically discover and use the connection immediately (no .env edit or restart required)."
+    )
+
+
+@tool(
+    "composio_execute_action",
+    "Execute any Composio tool action across 250+ connected apps (GitHub, Notion, Slack, Discord, Linear, Gmail, Calendar, Drive, etc.) using Composio as the universal bridge.",
+    {
+        "toolkit": {
+            "type": "string",
+            "description": "Toolkit slug, e.g. 'github', 'notion', 'slack', 'gmail'.",
+        },
+        "tool_slug": {
+            "type": "string",
+            "description": "Exact Composio action slug, e.g. 'GITHUB_STAR_A_REPOSITORY_FOR_THE_AUTHENTICATED_USER', 'NOTION_SEARCH_NOTION_PAGE', 'SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL'.",
+        },
+        "arguments": {
+            "type": "object",
+            "description": "JSON object of arguments for the Composio tool action.",
+        },
+        "require_confirmation": {
+            "type": "boolean",
+            "description": "Set True for write/send/delete actions that modify external state; False for read/search actions.",
+        },
+    },
+    ["toolkit", "tool_slug"],
+)
+async def composio_execute_action(
+    ctx: ToolContext,
+    toolkit: str,
+    tool_slug: str,
+    arguments: dict[str, Any] | None = None,
+    require_confirmation: bool = False,
+) -> str:
+    args = dict(arguments or {})
+    if require_confirmation:
+        return _queue_action(
+            ctx,
+            "composio_exec",
+            {"toolkit": toolkit, "tool_slug": tool_slug, "arguments": args},
+            f"Run Composio action {tool_slug} on {toolkit} with {json.dumps(args)[:200]}.",
+        )
+    return await execute(toolkit, tool_slug.upper(), args)

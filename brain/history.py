@@ -25,7 +25,10 @@ def trim_history(
         hist.pop(0)
 
     def _size() -> int:
-        return sum(len(json.dumps(m, default=str)) for m in hist)
+        return sum(
+            len(json.dumps({k: v for k, v in m.items() if k != "_media"}, default=str))
+            for m in hist
+        )
 
     while len(hist) > 1 and _size() > max_chars:
         next_user = next(
@@ -100,11 +103,25 @@ def history_to_gemini(messages: list[dict[str, Any]]) -> tuple[str, list[dict[st
                 function_response["id"] = call_id
             part = {"functionResponse": function_response}
             if contents and contents[-1].get("role") == "user" and all(
-                "functionResponse" in p for p in contents[-1].get("parts", [])
+                isinstance(p, dict) and "functionResponse" in p
+                for p in contents[-1].get("parts", [])
             ):
                 contents[-1]["parts"].append(part)
             else:
                 contents.append({"role": "user", "parts": [part]})
+
+            media_items = message.get("_media") or []
+            if media_items:
+                try:
+                    from google.genai import types
+
+                    for raw_bytes, mime_type in media_items:
+                        if raw_bytes and mime_type:
+                            contents[-1]["parts"].append(
+                                types.Part.from_bytes(data=raw_bytes, mime_type=mime_type)
+                            )
+                except Exception:
+                    log.debug("Could not attach tool media part to Gemini contents", exc_info=True)
 
     return system, contents
 
@@ -132,11 +149,18 @@ def candidate_content_dict(response: Any, tool_calls: list[dict[str, Any]]) -> d
 
 
 def response_text(response: Any) -> str:
-    """Extract text parts without triggering SDK warnings on function_call responses."""
+    """Extract only visible reply text (excluding internal `thought=True` reasoning parts)."""
     candidates = getattr(response, "candidates", None)
     if candidates:
         try:
             parts = candidates[0].content.parts or []
+            visible_parts = [
+                p.text
+                for p in parts
+                if getattr(p, "text", None) and not getattr(p, "thought", False)
+            ]
+            if visible_parts:
+                return "".join(visible_parts).strip()
             return "".join(p.text for p in parts if getattr(p, "text", None)).strip()
         except (AttributeError, IndexError, TypeError):
             pass

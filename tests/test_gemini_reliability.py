@@ -52,6 +52,9 @@ class GeminiReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.ctx = ToolContext(bot=None, chat_id=4242, user_id=4242)
         agent.HISTORY.pop(self.ctx.chat_id, None)
         gemini._primary_down_until = 0.0
+        gemini._primary_failures = 0
+        gemini._probe_task = None
+        gemini._STATS.clear()
         self.calls: list[str] = []
 
     def _install(self, generate):
@@ -168,9 +171,10 @@ class GeminiReliabilityTests(unittest.IsolatedAsyncioTestCase):
             self.calls.append(model)
             raise _ProviderError(429, "Resource exhausted")
 
-        reply = await self._ask(generate)
+        with patch.object(config, "LLM_FAST_MODEL", "gemini-3.8-flash"):
+            reply = await self._ask(generate)
         self.assertIn("rate-limiting", reply)
-        self.assertEqual(self.calls, [config.LLM_FAST_MODEL])
+        self.assertEqual(self.calls, ["gemini-3.8-flash"])
 
     async def test_multi_tool_history_survives(self):
         steps = {"n": 0}
@@ -245,6 +249,83 @@ class GeminiReliabilityTests(unittest.IsolatedAsyncioTestCase):
             agent.respond(self.ctx, "hello"), other_work()
         )
         self.assertLess(seen.index("telegram-other"), seen.index("model-end"))
+
+    async def test_exponential_breaker_background_probe_and_token_redaction(self):
+        # Verify bare Telegram bot tokens are scrubbed by redact_secrets & RedactingFormatter
+        leaked = "InvalidToken: token `9876543210:AAH1234567890abcdefghijklmnopqrstuv` was rejected"
+        scrubbed = config.redact_secrets(leaked)
+        self.assertNotIn("AAH1234567890", scrubbed)
+        self.assertIn("[REDACTED_BOT_TOKEN]", scrubbed)
+
+        # Verify exponential cooldown doubles with consecutive failures and records stats
+        gemini._note_primary_failure("gemini-3.8-flash")
+        self.assertEqual(gemini._primary_failures, 1)
+        self.assertEqual(gemini._cooldown_for(1), 180)
+        self.assertEqual(gemini._cooldown_for(2), 360)
+
+        # Simulate cooldown expiry while breaker remains open until background probe succeeds
+        gemini._primary_down_until = 0.0
+        self.assertTrue(gemini._breaker_open())
+
+        async def generate(*, model, contents, config):
+            self.calls.append(model)
+            return _Response("OK")
+
+        self._install(generate)
+        reply = await agent.respond(self.ctx, "Quick check")
+        self.assertEqual(reply, "OK")
+        # User turn stayed on fallback immediately, and background probe ran for primary
+        self.assertEqual(self.calls[0], config.LLM_FALLBACK_MODEL)
+        if gemini._probe_task:
+            await gemini._probe_task
+        self.assertEqual(gemini._primary_failures, 0)
+        health = gemini.model_health()
+        self.assertIn("stats", health)
+
+    async def test_parallel_multi_tool_execution_and_auto_knowledge_recall(self):
+        # 1. Verify proactive Second Brain auto-injection into system_prompt
+        with patch("tools.knowledge.db", self.repo):
+            self.repo.add_knowledge_note(
+                title="Project Chimera Architecture",
+                content="Project Chimera telemetry runs on port 9091 with mTLS.",
+                tags="chimera,devops",
+                user_id=self.ctx.user_id,
+            )
+            prompt_text = agent.system_prompt(
+                user_id=self.ctx.user_id,
+                query="Which port does Project Chimera telemetry use?",
+            )
+            self.assertIn("9091", prompt_text)
+            self.assertIn("Project Chimera Architecture", prompt_text)
+
+        # 2. Verify multiple tool calls in a single turn execute concurrently via asyncio.gather
+        turn = {"n": 0}
+        active = {"current": 0, "peak": 0}
+
+        async def generate(*, model, contents, config):
+            turn["n"] += 1
+            if turn["n"] == 1:
+                return _Response(
+                    "",
+                    [
+                        _Call("web_search", {"query": "alpha"}, "c1"),
+                        _Call("web_search", {"query": "beta"}, "c2"),
+                    ],
+                )
+            return _Response("Synthesized alpha and beta.")
+
+        async def fake_run_tool(ctx, name, args):
+            active["current"] += 1
+            active["peak"] = max(active["peak"], active["current"])
+            await asyncio.sleep(0.02)
+            active["current"] -= 1
+            return f"result-{args.get('query')}"
+
+        with patch.object(agent.tools, "run_tool", side_effect=fake_run_tool):
+            reply = await self._ask(generate, text="Compare alpha and beta")
+
+        self.assertEqual(reply, "Synthesized alpha and beta.")
+        self.assertEqual(active["peak"], 2)
 
 
 if __name__ == "__main__":

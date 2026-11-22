@@ -205,6 +205,32 @@ class BudgetItem:
 
 
 @dataclass(slots=True)
+class StudyTopic:
+    id: int
+    user_id: int
+    subject: str
+    level: int
+    lessons_completed: int
+    next_subtopic: str
+    status: str
+    created_at: str
+    last_studied_at: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "subject": self.subject,
+            "level": self.level,
+            "lessons_completed": self.lessons_completed,
+            "next_subtopic": self.next_subtopic,
+            "status": self.status,
+            "created_at": self.created_at,
+            "last_studied_at": self.last_studied_at,
+        }
+
+
+@dataclass(slots=True)
 class SystemStatus:
     memories: int
     open_tasks: int
