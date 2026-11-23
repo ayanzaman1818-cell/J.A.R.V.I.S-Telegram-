@@ -1011,9 +1011,19 @@ class DesktopOverlayService:
             import sys
 
             _ensure_stdlib_before_pyside()
+            from PySide6.QtGui import QFont, QFontDatabase
             from PySide6.QtWidgets import QApplication
 
             app = QApplication.instance() or QApplication(sys.argv)
+            # Load bundled Apple SF Pro Display & SF Pro Text fonts from assets/fonts
+            fonts_dir = config.BASE_DIR / "assets" / "fonts"
+            if fonts_dir.exists():
+                for otf_path in sorted(fonts_dir.glob("*.otf")):
+                    try:
+                        QFontDatabase.addApplicationFont(str(otf_path))
+                    except Exception:
+                        pass
+            app.setFont(QFont("SF Pro Display", 10))
             self._qt_app = app
             window = _create_qt_notch_window(self)
             self._qt_window = window
@@ -1905,7 +1915,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
                 # 2. Center: Crisp "JARVIS" label in the middle between the Album Cover and Visualizer
                 p.setPen(QColor(226, 232, 240, 215))
-                font = QFont("Segoe UI", 8, QFont.Weight.Bold)
+                font = QFont("SF Pro Display", 8, QFont.Weight.Bold)
                 font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.8)
                 p.setFont(font)
                 p.drawText(QRectF(left, 0.0, nw, nh), Qt.AlignmentFlag.AlignCenter, "JARVIS")
@@ -1953,7 +1963,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     p.setBrush(QColor("#34d399"))
                     p.drawEllipse(QPointF(left + 14.0, nh / 2.0), 2.8, 2.8)
                     p.setPen(QColor(226, 232, 240, 210))
-                    font = QFont("Segoe UI", 8, QFont.Weight.Bold)
+                    font = QFont("SF Pro Display", 8, QFont.Weight.Bold)
                     font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.8)
                     p.setFont(font)
                     p.drawText(QRectF(left, 0, nw, nh), Qt.AlignmentFlag.AlignCenter, "JARVIS")
@@ -1966,6 +1976,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
         def _build_ui(self) -> None:
             # _content_root is manually positioned via setGeometry inside _update_notch_frame
             # so child minimum sizes NEVER force the main window to resize or shift!
+            self.setStyleSheet("QWidget { font-family: 'SF Pro Display', 'SF Pro Text', sans-serif; }")
             self._content_root = QWidget(self)
             self._opacity_effect = QGraphicsOpacityEffect(self._content_root)
             self._opacity_effect.setOpacity(1.0)
@@ -2580,7 +2591,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._chat_output.setStyleSheet(
                 "QTextBrowser { background: rgba(15, 23, 42, 0.52); color: #f1f5f9; "
                 "border: 1px solid rgba(255,255,255,0.11); border-radius: 16px; "
-                "padding: 10px 12px; font-size: 13px; font-family: 'Segoe UI', sans-serif; }"
+                "padding: 10px 12px; font-size: 13px; font-family: 'SF Pro Text', 'SF Pro Display', sans-serif; }"
             )
             self._chat_output.hide()
             layout.addWidget(self._chat_output, stretch=1)
