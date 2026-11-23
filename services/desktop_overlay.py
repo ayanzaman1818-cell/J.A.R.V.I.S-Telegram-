@@ -2061,17 +2061,23 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             ml.addWidget(self._dash_music_icon)
 
             m_text_col = QVBoxLayout()
-            m_text_col.setSpacing(2)
-            self._dash_media_source = QLabel("NOW PLAYING")
+            m_text_col.setSpacing(1)
+            self._dash_media_source = QLabel("SPOTIFY · PLAYING NOW")
             self._dash_media_source.setStyleSheet(
-                "color: #6ee7b7; font-size: 10.5px; font-weight: 800; letter-spacing: 0.8px; border: none; background: transparent;"
+                "color: #6ee7b7; font-size: 9.5px; font-weight: 800; letter-spacing: 0.8px; border: none; background: transparent;"
             )
             self._dash_media_track = QLabel("No song playing right now")
             self._dash_media_track.setStyleSheet(
                 "color: #ffffff; font-size: 14px; font-weight: 800; border: none; background: transparent;"
             )
+            self._dash_media_artist = QLabel("")
+            self._dash_media_artist.setStyleSheet(
+                "color: #94a3b8; font-size: 12px; font-weight: 600; border: none; background: transparent;"
+            )
+            self._dash_media_artist.hide()
             m_text_col.addWidget(self._dash_media_source)
             m_text_col.addWidget(self._dash_media_track)
+            m_text_col.addWidget(self._dash_media_artist)
             ml.addLayout(m_text_col, stretch=1)
 
             # Media transport controls (Prev / Play-Pause / Next)
@@ -2205,10 +2211,22 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
             snap = self.service.fetch_dashboard_snapshot()
             media = snap["media"]
-            track_str = str(media.get("track") or "No song playing right now")
-            if len(track_str) > 42:
-                track_str = track_str[:40] + "…"
-            self._dash_media_track.setText(track_str)
+            raw_track = str(media.get("track") or "No song playing right now")
+            # Spotify window titles are "Artist - Song Title"; display Song Title on top in bold white, and Artist right under it in grey!
+            if " - " in raw_track:
+                artist_part, song_part = (p.strip() for p in raw_track.split(" - ", 1))
+            else:
+                song_part, artist_part = raw_track.strip(), ""
+            if len(song_part) > 36:
+                song_part = song_part[:34] + "…"
+            if len(artist_part) > 38:
+                artist_part = artist_part[:36] + "…"
+            self._dash_media_track.setText(song_part)
+            if artist_part:
+                self._dash_media_artist.setText(artist_part)
+                self._dash_media_artist.show()
+            else:
+                self._dash_media_artist.hide()
             self._dash_media_source.setText(str(media.get("source") or "NOW PLAYING").upper())
             if self._art_pixmap is not None and not self._art_pixmap.isNull():
                 scaled_art = self._art_pixmap.scaled(
