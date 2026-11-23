@@ -1556,6 +1556,13 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._vis_phase: float = 0.0
             self._art_pixmap: QPixmap | None = None
             self._art_pixmap_track: str = ""
+
+            # Adaptive App-Blending Notch Color (samples top of the active app right beside the notch)
+            self._notch_bg_rgb: list[float] = [7.0, 8.0, 11.0]
+            self._notch_target_rgb: list[float] = [7.0, 8.0, 11.0]
+            self._notch_is_light: bool = False
+            self._color_sample_ts: float = 0.0
+
             self._vis_timer = QTimer(self)
             self._vis_timer.timeout.connect(self._on_visualizer_tick)
             self._vis_timer.start(32)
@@ -1601,19 +1608,19 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     # User deliberately pushed cursor to the very top pixel edge of the monitor -> untuck & hover/open
                     if self._tucked_dodge:
                         self._tucked_dodge = False
-                        self._animate_to("hover", duration_ms=260)
+                        self._animate_to("hover", duration_ms=360)
                     elif self.state == "idle":
-                        self._animate_to("hover", duration_ms=280)
+                        self._animate_to("hover", duration_ms=380)
                 elif in_center_x and 3 <= local.y() <= 54:
                     # User is hovering over a browser tab / window title bar right under the notch -> tuck up out of the way!
                     if not self._tucked_dodge and self.state == "idle":
                         self._tucked_dodge = True
-                        self._animate_to("idle", duration_ms=220)
+                        self._animate_to("idle", duration_ms=340)
                 else:
                     # Cursor moved away from the top tab bar -> restore the normal idle / music notch
                     if self._tucked_dodge:
                         self._tucked_dodge = False
-                        self._animate_to("idle", duration_ms=340)
+                        self._animate_to("idle", duration_ms=460)
 
             if not just_clicked:
                 return
@@ -1684,8 +1691,74 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._opacity_effect.setOpacity(t)
             self._update_notch_frame(self._notch_w, self._notch_h)
 
+        def _sample_top_app_color(self) -> None:
+            """Sample 2 pixels immediately left & right of the notch on the active app's titlebar and compute a subtle darker/lighter shade."""
+            if os.name != "nt":
+                return
+            try:
+                user32 = ctypes.windll.user32
+                gdi32 = ctypes.windll.gdi32
+                hdc = user32.GetDC(0)
+                if not hdc:
+                    return
+                try:
+                    sw = user32.GetSystemMetrics(0)
+                    cx = sw // 2
+                    offset = int(max(145, self._notch_w / 2.0 + 36))
+                    samples: list[tuple[int, int, int]] = []
+                    for dx in (-offset, offset):
+                        sx = max(0, min(sw - 1, cx + dx))
+                        col = gdi32.GetPixel(hdc, sx, 6)
+                        if col != -1 and col != 0xFFFFFFFF:
+                            samples.append((col & 0xFF, (col >> 8) & 0xFF, (col >> 16) & 0xFF))
+                finally:
+                    user32.ReleaseDC(0, hdc)
+
+                if not samples:
+                    return
+                avg_r = sum(s[0] for s in samples) / len(samples)
+                avg_g = sum(s[1] for s in samples) / len(samples)
+                avg_b = sum(s[2] for s in samples) / len(samples)
+                lum = 0.299 * avg_r + 0.587 * avg_g + 0.114 * avg_b
+
+                if lum > 145.0:
+                    # Light app titlebar (e.g. Chrome Light, Explorer, Word): use a sleek darker shade of that app's color
+                    tr = max(0.0, avg_r - 28.0)
+                    tg = max(0.0, avg_g - 28.0)
+                    tb = max(0.0, avg_b - 28.0)
+                    self._notch_is_light = True
+                elif lum > 42.0:
+                    # Mid-tone / dark-grey app titlebar (e.g. Discord, VS Code, Chrome Dark): slightly darker shade
+                    tr = max(8.0, avg_r * 0.72)
+                    tg = max(8.0, avg_g * 0.72)
+                    tb = max(10.0, avg_b * 0.72)
+                    self._notch_is_light = False
+                else:
+                    # Pitch-black / OLED dark app titlebar (e.g. Spotify, Dark Terminal): slightly lighter elevated charcoal shade
+                    tr = min(255.0, avg_r + 18.0)
+                    tg = min(255.0, avg_g + 19.0)
+                    tb = min(255.0, avg_b + 23.0)
+                    self._notch_is_light = False
+
+                self._notch_target_rgb = [tr, tg, tb]
+            except Exception:
+                pass
+
         def _on_visualizer_tick(self) -> None:
-            """30fps tick that syncs the Dynamic Island idle visualizer with real Windows audio output & album cover."""
+            """30fps tick that syncs the Dynamic Island idle visualizer with real Windows audio output, album cover & app titlebar color."""
+            now_t = time.time()
+            if self.state in ("idle", "hover") and (now_t - self._color_sample_ts >= 0.45):
+                self._color_sample_ts = now_t
+                self._sample_top_app_color()
+
+            # Smoothly interpolate current notch color toward the sampled app shade
+            color_changed = False
+            for idx in range(3):
+                diff = self._notch_target_rgb[idx] - self._notch_bg_rgb[idx]
+                if abs(diff) > 0.35:
+                    self._notch_bg_rgb[idx] += diff * 0.14
+                    color_changed = True
+
             media = self.service.get_cached_now_playing()
             is_playing = bool(media.get("playing"))
 
@@ -1708,6 +1781,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     self._animate_to(self.state, duration_ms=460)
 
             if not is_playing:
+                if color_changed and self.state in ("idle", "hover"):
+                    self.update()
                 return
 
             # Sample live Windows WASAPI master audio peak (0.0 .. 1.0) with balanced, natural responsiveness
@@ -1826,10 +1901,10 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 # if the cursor enters from below (e.g. aiming for a browser tab underneath), tuck out of the way!
                 if local.y() <= 2:
                     self._tucked_dodge = False
-                    self._animate_to("hover", duration_ms=340)
+                    self._animate_to("hover", duration_ms=420)
                 elif not self._tucked_dodge:
                     self._tucked_dodge = True
-                    self._animate_to("idle", duration_ms=200)
+                    self._animate_to("idle", duration_ms=340)
             super().enterEvent(event)
 
         def leaveEvent(self, event: Any) -> None:
@@ -1837,7 +1912,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 local = self.mapFromGlobal(QCursor.pos())
                 if 3 <= local.y() <= 54 and abs(local.x() - CANVAS_W / 2.0) <= 165.0:
                     self._tucked_dodge = True
-                self._animate_to("idle", duration_ms=380)
+                self._animate_to("idle", duration_ms=460)
             super().leaveEvent(event)
 
         def mousePressEvent(self, event: Any) -> None:
@@ -1903,9 +1978,14 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             path.quadTo(right, 0.0, right + ear, 0.0)
             path.closeSubpath()
 
-            # Pitch-black notch fill (#07080b)
+            # Adaptive notch fill: smoothly blends to a darker/lighter shade of the app at the top of the screen when idle/hovering,
+            # and stays deep dark glass (#07080b) when expanded into the full PC Dashboard / Chat / Voice cards.
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor("#07080b"))
+            if nh > 60:
+                p.setBrush(QColor("#07080b"))
+            else:
+                bg_r, bg_g, bg_b = (int(round(c)) for c in self._notch_bg_rgb)
+                p.setBrush(QColor(bg_r, bg_g, bg_b))
             p.drawPath(path)
 
             if nh > 60:
@@ -1960,8 +2040,9 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawRoundedRect(art_rect, 4.2, 4.2)
 
-                # 2. Center: Crisp "JARVIS" label in the middle between the Album Cover and Visualizer
-                p.setPen(QColor(226, 232, 240, 215))
+                # 2. Center: Crisp "JARVIS" label in the middle between the Album Cover and Visualizer (auto-contrast for light/dark app themes)
+                label_col = QColor(15, 23, 42, 225) if self._notch_is_light else QColor(226, 232, 240, 215)
+                p.setPen(label_col)
                 font = QFont("SF Pro Display", 8, QFont.Weight.Bold)
                 font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.8)
                 p.setFont(font)
@@ -1997,19 +2078,21 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     p.drawRoundedRect(QRectF(bx, by, bar_w, bh), 1.3, 1.3)
 
                 p.restore()
-                p.setPen(QPen(QColor(255, 255, 255, 28), 0.9))
+                border_col = QColor(0, 0, 0, 34) if self._notch_is_light else QColor(255, 255, 255, 28)
+                p.setPen(QPen(border_col, 0.9))
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawPath(path)
             elif self.state == "hover":
-                p.setPen(QPen(QColor(255, 255, 255, 36), 1.0))
+                border_col = QColor(0, 0, 0, 40) if self._notch_is_light else QColor(255, 255, 255, 36)
+                p.setPen(QPen(border_col, 1.0))
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawPath(path)
                 # Glowing emerald status dot + crisp 'JARVIS' micro-label ONLY when actively hovering the notch
                 if nh >= 15:
                     p.setPen(Qt.PenStyle.NoPen)
-                    p.setBrush(QColor("#34d399"))
+                    p.setBrush(QColor("#10b981") if self._notch_is_light else QColor("#34d399"))
                     p.drawEllipse(QPointF(left + 14.0, nh / 2.0), 2.8, 2.8)
-                    p.setPen(QColor(226, 232, 240, 210))
+                    p.setPen(QColor(15, 23, 42, 225) if self._notch_is_light else QColor(226, 232, 240, 210))
                     font = QFont("SF Pro Display", 8, QFont.Weight.Bold)
                     font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.8)
                     p.setFont(font)
