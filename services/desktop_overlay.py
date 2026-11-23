@@ -1498,6 +1498,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
         # Target visual notch dimensions (width, height) inside the fixed 580x540 canvas
         SIZES: dict[str, tuple[int, int]] = {
+            "tucked": (76, 3),         # Ultra-thin 3px top edge micro-line when cursor approaches tabs/titlebar below
             "idle": (96, 7),           # Compact micro-strip at top center when no music is playing
             "idle_music": (212, 23),   # Sleek horizontal music strip: wide horizontally, slight vertical height for album cover + visualizer
             "hover": (176, 20),        # Slightly larger hovered pill with status dot + JARVIS text
@@ -1550,6 +1551,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
             # Live 33fps Music Visualizer & Album Cover state for the Idle Dynamic Notch
             self._music_playing_active: bool = False
+            self._tucked_dodge: bool = False
             self._vis_bars: list[float] = [0.22, 0.35, 0.50, 0.38, 0.28, 0.42]
             self._vis_phase: float = 0.0
             self._art_pixmap: QPixmap | None = None
@@ -1585,14 +1587,40 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             just_clicked = is_down and not self._mouse_down_prev
             self._mouse_down_prev = is_down
 
+            # --- Smart Title-Bar / Browser-Tab Dodge (Option 2) ---
+            # When the notch is in idle/hover mode, if the user moves their mouse near the top title bar / browser tabs
+            # (4 <= y <= 56 around the center) to click or see a tab underneath, automatically tuck the notch up into a
+            # 3px micro-line so the tab underneath is 100% visible & clickable!
+            # Pushing the cursor all the way to the very top edge of the monitor (y <= 2) untucks & opens the notch.
+            pos = QCursor.pos()
+            local = self.mapFromGlobal(pos)
+            cx = CANVAS_W / 2.0
+            in_center_x = abs(local.x() - cx) <= 165.0
+            if self.state in ("idle", "hover"):
+                if in_center_x and local.y() <= 2:
+                    # User deliberately pushed cursor to the very top pixel edge of the monitor -> untuck & hover/open
+                    if self._tucked_dodge:
+                        self._tucked_dodge = False
+                        self._animate_to("hover", duration_ms=260)
+                    elif self.state == "idle":
+                        self._animate_to("hover", duration_ms=280)
+                elif in_center_x and 3 <= local.y() <= 54:
+                    # User is hovering over a browser tab / window title bar right under the notch -> tuck up out of the way!
+                    if not self._tucked_dodge and self.state == "idle":
+                        self._tucked_dodge = True
+                        self._animate_to("idle", duration_ms=220)
+                else:
+                    # Cursor moved away from the top tab bar -> restore the normal idle / music notch
+                    if self._tucked_dodge:
+                        self._tucked_dodge = False
+                        self._animate_to("idle", duration_ms=340)
+
             if not just_clicked:
                 return
             if self.pinned or self.state not in ("dashboard", "suggestions", "chat", "voice"):
                 return
 
             # Check if the global cursor position is outside the current visible notch rectangle
-            pos = QCursor.pos()
-            local = self.mapFromGlobal(pos)
             ear = self.EAR_RADIUS if self._notch_h > 30 else 6
             left = (CANVAS_W - self._notch_w) / 2.0 - ear - 4.0
             right = (CANVAS_W + self._notch_w) / 2.0 + ear + 4.0
@@ -1623,15 +1651,21 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
         def _update_notch_frame(self, w: float, h: float) -> None:
             self._notch_w = float(w)
             self._notch_h = float(h)
-            # Round mask width to an even integer so (CANVAS_W - mask_w) // 2 is always 100% symmetric
-            ear = self.EAR_RADIUS if h > 30 else max(4, int(h * 0.6))
-            raw_mw = int(math.ceil(self._notch_w)) + ear * 2 + 6
-            if raw_mw % 2 == 1:
-                raw_mw += 1
-            mask_w = min(CANVAS_W, raw_mw)
-            mask_h = min(CANVAS_H, int(math.ceil(self._notch_h)) + 6)
-            mask_left = (CANVAS_W - mask_w) // 2
-            self.setMask(QRegion(QRect(mask_left, 0, mask_w, mask_h)))
+            if getattr(self, "_tucked_dodge", False) and self.state == "idle" and h <= 6.0:
+                # When tucked out of the way of a browser tab, only mask the top 2 pixels (y=0..2)
+                # so the entire browser tab / title bar underneath is 100% OS click-through!
+                tuck_w = 140
+                self.setMask(QRegion(QRect((CANVAS_W - tuck_w) // 2, 0, tuck_w, 2)))
+            else:
+                # Round mask width to an even integer so (CANVAS_W - mask_w) // 2 is always 100% symmetric
+                ear = self.EAR_RADIUS if h > 30 else max(4, int(h * 0.6))
+                raw_mw = int(math.ceil(self._notch_w)) + ear * 2 + 6
+                if raw_mw % 2 == 1:
+                    raw_mw += 1
+                mask_w = min(CANVAS_W, raw_mw)
+                mask_h = min(CANVAS_H, int(math.ceil(self._notch_h)) + 6)
+                mask_left = (CANVAS_W - mask_w) // 2
+                self.setMask(QRegion(QRect(mask_left, 0, mask_w, mask_h)))
 
             # Keep content container centered and smoothly gliding down during transition
             slide_offset = getattr(self, "_slide_y", 0.0)
@@ -1716,6 +1750,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self.state = new_state
             if new_state == "chat" and self._has_messages:
                 key = "chat_active"
+            elif new_state == "idle" and getattr(self, "_tucked_dodge", False):
+                key = "tucked"
             elif new_state == "idle" and getattr(self, "_music_playing_active", False):
                 key = "idle_music"
             elif new_state == "hover" and getattr(self, "_music_playing_active", False):
@@ -1785,12 +1821,23 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
         def enterEvent(self, event: Any) -> None:
             if self.state == "idle":
-                self._animate_to("hover", duration_ms=380)
+                local = self.mapFromGlobal(QCursor.pos())
+                # Only trigger hover expansion when pushing the cursor to the very top 2px edge of the screen;
+                # if the cursor enters from below (e.g. aiming for a browser tab underneath), tuck out of the way!
+                if local.y() <= 2:
+                    self._tucked_dodge = False
+                    self._animate_to("hover", duration_ms=340)
+                elif not self._tucked_dodge:
+                    self._tucked_dodge = True
+                    self._animate_to("idle", duration_ms=200)
             super().enterEvent(event)
 
         def leaveEvent(self, event: Any) -> None:
             if self.state == "hover":
-                self._animate_to("idle", duration_ms=420)
+                local = self.mapFromGlobal(QCursor.pos())
+                if 3 <= local.y() <= 54 and abs(local.x() - CANVAS_W / 2.0) <= 165.0:
+                    self._tucked_dodge = True
+                self._animate_to("idle", duration_ms=380)
             super().leaveEvent(event)
 
         def mousePressEvent(self, event: Any) -> None:
