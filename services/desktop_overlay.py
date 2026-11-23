@@ -1745,20 +1745,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 pass
 
         def _on_visualizer_tick(self) -> None:
-            """30fps tick that syncs the Dynamic Island idle visualizer with real Windows audio output, album cover & app titlebar color."""
-            now_t = time.time()
-            if self.state in ("idle", "hover") and (now_t - self._color_sample_ts >= 0.45):
-                self._color_sample_ts = now_t
-                self._sample_top_app_color()
-
-            # Smoothly interpolate current notch color toward the sampled app shade
-            color_changed = False
-            for idx in range(3):
-                diff = self._notch_target_rgb[idx] - self._notch_bg_rgb[idx]
-                if abs(diff) > 0.35:
-                    self._notch_bg_rgb[idx] += diff * 0.14
-                    color_changed = True
-
+            """30fps tick that syncs the Dynamic Island idle visualizer with real Windows audio output & album cover."""
             media = self.service.get_cached_now_playing()
             is_playing = bool(media.get("playing"))
 
@@ -1781,8 +1768,6 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     self._animate_to(self.state, duration_ms=460)
 
             if not is_playing:
-                if color_changed and self.state in ("idle", "hover"):
-                    self.update()
                 return
 
             # Sample live Windows WASAPI master audio peak (0.0 .. 1.0) with balanced, natural responsiveness
@@ -1978,14 +1963,9 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             path.quadTo(right, 0.0, right + ear, 0.0)
             path.closeSubpath()
 
-            # Adaptive notch fill: smoothly blends to a darker/lighter shade of the app at the top of the screen when idle/hovering,
-            # and stays deep dark glass (#07080b) when expanded into the full PC Dashboard / Chat / Voice cards.
+            # Solid pure black notch fill (#07080b)
             p.setPen(Qt.PenStyle.NoPen)
-            if nh > 60:
-                p.setBrush(QColor("#07080b"))
-            else:
-                bg_r, bg_g, bg_b = (int(round(c)) for c in self._notch_bg_rgb)
-                p.setBrush(QColor(bg_r, bg_g, bg_b))
+            p.setBrush(QColor("#07080b"))
             p.drawPath(path)
 
             if nh > 60:
@@ -2036,9 +2016,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawRoundedRect(art_rect, 4.2, 4.2)
 
-                # 2. Center: Crisp "JARVIS" label in the middle between the Album Cover and Visualizer (auto-contrast for light/dark app themes)
-                label_col = QColor(15, 23, 42, 225) if self._notch_is_light else QColor(226, 232, 240, 215)
-                p.setPen(label_col)
+                # 2. Center: Crisp "JARVIS" label in the middle between the Album Cover and Visualizer
+                p.setPen(QColor(226, 232, 240, 215))
                 font = QFont("SF Pro Display", 8, QFont.Weight.Bold)
                 font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.8)
                 p.setFont(font)
@@ -2078,9 +2057,9 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 # Glowing emerald status dot + crisp 'JARVIS' micro-label ONLY when actively hovering the notch
                 if nh >= 15:
                     p.setPen(Qt.PenStyle.NoPen)
-                    p.setBrush(QColor("#10b981") if self._notch_is_light else QColor("#34d399"))
+                    p.setBrush(QColor("#34d399"))
                     p.drawEllipse(QPointF(left + 14.0, nh / 2.0), 2.8, 2.8)
-                    p.setPen(QColor(15, 23, 42, 225) if self._notch_is_light else QColor(226, 232, 240, 210))
+                    p.setPen(QColor(226, 232, 240, 210))
                     font = QFont("SF Pro Display", 8, QFont.Weight.Bold)
                     font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.8)
                     p.setFont(font)
