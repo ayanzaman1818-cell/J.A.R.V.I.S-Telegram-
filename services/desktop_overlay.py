@@ -3466,6 +3466,15 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     p.setBrush(QColor("#38bdf8"))
                     p.drawEllipse(QPointF(right - 14.0, nh / 2.0), 2.4, 2.4)
 
+            # Always overlay glowing iOS/macOS orange (mic) / green (camera) privacy dots when active on ANY expanded/music/clock notch
+            if (getattr(self, "_priv_mic", False) or getattr(self, "_priv_cam", False)) and nh >= 14 and self._last_idle_key != "idle_privacy":
+                p.save()
+                p.setClipPath(path)
+                dot_x = right - 12.0 if nh > 60 else (cx)
+                dot_y = 10.0 if nh > 60 else 4.2
+                _EXTRAS["draw_privacy_dots"](p, dot_x, dot_y, bool(self._priv_mic), bool(self._priv_cam))
+                p.restore()
+
         # --- UI Pages Construction (Suggestions, Quick Chat, Voice Orb) ---
 
         def _build_ui(self) -> None:

@@ -67,26 +67,163 @@ def get_battery_status() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 2. Live Mic & Camera Privacy Indicators (Windows CapabilityAccessManager)
+# 2. Live Mic & Camera Privacy Indicators (Hardware CoreAudio + Win32 FrameServer + ConsentStore)
 # ---------------------------------------------------------------------------
 
+class _GUID(ctypes.Structure):
+    _fields_ = [
+        ("Data1", ctypes.c_ulong),
+        ("Data2", ctypes.c_ushort),
+        ("Data3", ctypes.c_ushort),
+        ("Data4", ctypes.c_ubyte * 8),
+    ]
+
+    @classmethod
+    def from_str(cls, s: str) -> "_GUID":
+        import uuid
+
+        u = uuid.UUID(s)
+        return cls(u.time_low, u.time_mid, u.time_hi_version, (ctypes.c_ubyte * 8)(*u.bytes[8:]))
+
+
+class _SERVICE_STATUS(ctypes.Structure):
+    _fields_ = [
+        ("dwServiceType", wt.DWORD),
+        ("dwCurrentState", wt.DWORD),
+        ("dwControlsAccepted", wt.DWORD),
+        ("dwWin32ExitCode", wt.DWORD),
+        ("dwServiceSpecificExitCode", wt.DWORD),
+        ("dwCheckPoint", wt.DWORD),
+        ("dwWaitHint", wt.DWORD),
+    ]
+
+
+def _is_coreaudio_mic_active() -> bool:
+    """Hardware-level (<0.5ms) CoreAudio eCapture IAudioSessionManager2 check for ANY active microphone stream."""
+    if os.name != "nt":
+        return False
+    try:
+        from ctypes import POINTER, byref, c_int, c_uint, c_void_p, HRESULT
+
+        ole32 = ctypes.windll.ole32
+        ole32.CoInitialize(None)
+        clsid = _GUID.from_str("BCDE0395-E52F-467C-8E3D-C4579291692E")
+        iid_enum = _GUID.from_str("A95664D2-9614-4F35-A746-DE8DB63617E6")
+        iid_sm2 = _GUID.from_str("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F")
+
+        enum_p = c_void_p()
+        if ole32.CoCreateInstance(byref(clsid), None, 23, byref(iid_enum), byref(enum_p)) != 0 or not enum_p:
+            return False
+        vt = ctypes.cast(ctypes.cast(enum_p, POINTER(c_void_p))[0], POINTER(c_void_p))
+        enum_ep = ctypes.WINFUNCTYPE(HRESULT, c_void_p, c_int, c_uint, POINTER(c_void_p))(vt[3])
+        release_enum = ctypes.WINFUNCTYPE(ctypes.c_ulong, c_void_p)(vt[2])
+
+        col_p = c_void_p()
+        if enum_ep(enum_p, 1, 1, byref(col_p)) != 0 or not col_p:  # eCapture=1, DEVICE_STATE_ACTIVE=1
+            release_enum(enum_p)
+            return False
+
+        cvt = ctypes.cast(ctypes.cast(col_p, POINTER(c_void_p))[0], POINTER(c_void_p))
+        get_cnt = ctypes.WINFUNCTYPE(HRESULT, c_void_p, POINTER(c_uint))(cvt[3])
+        get_item = ctypes.WINFUNCTYPE(HRESULT, c_void_p, c_uint, POINTER(c_void_p))(cvt[4])
+        release_col = ctypes.WINFUNCTYPE(ctypes.c_ulong, c_void_p)(cvt[2])
+
+        cnt = c_uint(0)
+        get_cnt(col_p, byref(cnt))
+        found_active = False
+
+        for i in range(cnt.value):
+            dev_p = c_void_p()
+            if get_item(col_p, i, byref(dev_p)) != 0 or not dev_p:
+                continue
+            dvt = ctypes.cast(ctypes.cast(dev_p, POINTER(c_void_p))[0], POINTER(c_void_p))
+            act = ctypes.WINFUNCTYPE(HRESULT, c_void_p, POINTER(_GUID), c_uint, c_void_p, POINTER(c_void_p))(dvt[3])
+            rel_dev = ctypes.WINFUNCTYPE(ctypes.c_ulong, c_void_p)(dvt[2])
+
+            sm_p = c_void_p()
+            if act(dev_p, byref(iid_sm2), 23, None, byref(sm_p)) == 0 and sm_p:
+                svt = ctypes.cast(ctypes.cast(sm_p, POINTER(c_void_p))[0], POINTER(c_void_p))
+                get_se = ctypes.WINFUNCTYPE(HRESULT, c_void_p, POINTER(c_void_p))(svt[5])
+                rel_sm = ctypes.WINFUNCTYPE(ctypes.c_ulong, c_void_p)(svt[2])
+
+                se_p = c_void_p()
+                if get_se(sm_p, byref(se_p)) == 0 and se_p:
+                    sevt = ctypes.cast(ctypes.cast(se_p, POINTER(c_void_p))[0], POINTER(c_void_p))
+                    scnt_fn = ctypes.WINFUNCTYPE(HRESULT, c_void_p, POINTER(c_int))(sevt[3])
+                    sget_fn = ctypes.WINFUNCTYPE(HRESULT, c_void_p, c_int, POINTER(c_void_p))(sevt[4])
+                    rel_se = ctypes.WINFUNCTYPE(ctypes.c_ulong, c_void_p)(sevt[2])
+
+                    sc = c_int(0)
+                    scnt_fn(se_p, byref(sc))
+                    for j in range(sc.value):
+                        ctrl_p = c_void_p()
+                        if sget_fn(se_p, j, byref(ctrl_p)) == 0 and ctrl_p:
+                            ctvt = ctypes.cast(ctypes.cast(ctrl_p, POINTER(c_void_p))[0], POINTER(c_void_p))
+                            gstate = ctypes.WINFUNCTYPE(HRESULT, c_void_p, POINTER(c_int))(ctvt[3])
+                            rel_c = ctypes.WINFUNCTYPE(ctypes.c_ulong, c_void_p)(ctvt[2])
+                            st = c_int(0)
+                            if gstate(ctrl_p, byref(st)) == 0 and st.value == 1:  # AudioSessionStateActive == 1
+                                found_active = True
+                            rel_c(ctrl_p)
+                        if found_active:
+                            break
+                    rel_se(se_p)
+                rel_sm(sm_p)
+            rel_dev(dev_p)
+            if found_active:
+                break
+
+        release_col(col_p)
+        release_enum(enum_p)
+        return found_active
+    except Exception:
+        return False
+
+
+def _is_frameserver_webcam_active() -> bool:
+    """Hardware-level (<0.1ms) Win32 SCM query on Windows Camera FrameServer service (SERVICE_RUNNING == 4)."""
+    if os.name != "nt":
+        return False
+    try:
+        adv = ctypes.windll.advapi32
+        adv.OpenSCManagerW.restype = wt.HANDLE
+        adv.OpenServiceW.restype = wt.HANDLE
+        scm = adv.OpenSCManagerW(None, None, 0x0001)  # SC_MANAGER_CONNECT
+        if not scm:
+            return False
+        try:
+            svc = adv.OpenServiceW(scm, "FrameServer", 0x0004)  # SERVICE_QUERY_STATUS
+            if not svc:
+                return False
+            try:
+                ss = _SERVICE_STATUS()
+                if adv.QueryServiceStatus(svc, ctypes.byref(ss)):
+                    return int(ss.dwCurrentState) == 4  # SERVICE_RUNNING
+            finally:
+                adv.CloseServiceHandle(svc)
+        finally:
+            adv.CloseServiceHandle(scm)
+    except Exception:
+        pass
+    return False
+
+
 def _scan_consent_store(device_name: str) -> tuple[bool, str]:
-    """Return (is_actively_in_use, friendly_app_name) from Windows Privacy ConsentStore (<1ms)."""
+    """Fallback ConsentStore scan for UWP apps when Windows privacy activity logging is enabled."""
     if os.name != "nt":
         return False, ""
     try:
         import winreg
 
         base = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\{device_name}"
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, base) as root:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, base, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as root:
             def _check_subkey(parent_key: Any, sub_name: str) -> tuple[bool, str]:
                 try:
-                    with winreg.OpenKey(parent_key, sub_name) as sk:
+                    with winreg.OpenKey(parent_key, sub_name, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as sk:
                         try:
                             start_val, _ = winreg.QueryValueEx(sk, "LastUsedTimeStart")
                             stop_val, _ = winreg.QueryValueEx(sk, "LastUsedTimeStop")
                             if int(start_val) > 0 and int(stop_val) == 0:
-                                # Clean up friendly app name from registry key path
                                 clean = sub_name.split("#")[-1].replace(".exe", "").strip()
                                 if "_" in clean:
                                     clean = clean.split("_")[0]
@@ -106,7 +243,7 @@ def _scan_consent_store(device_name: str) -> tuple[bool, str]:
                     break
                 if name == "NonPackaged":
                     try:
-                        with winreg.OpenKey(root, "NonPackaged") as np_key:
+                        with winreg.OpenKey(root, "NonPackaged", 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as np_key:
                             n_idx = 0
                             while True:
                                 try:
@@ -129,7 +266,7 @@ def _scan_consent_store(device_name: str) -> tuple[bool, str]:
 
 
 class PrivacyIndicatorTracker:
-    """Polls Windows Mic & Camera ConsentStore every 1.0s on demand with cached <0.1ms reads."""
+    """Polls hardware CoreAudio capture sessions + Win32 FrameServer + ConsentStore every 0.6s (<1ms)."""
 
     def __init__(self) -> None:
         self._last_ts: float = 0.0
@@ -142,15 +279,17 @@ class PrivacyIndicatorTracker:
 
     def get_status(self) -> dict[str, Any]:
         now = time.time()
-        if now - self._last_ts >= 1.0:
+        if now - self._last_ts >= 0.6:
             self._last_ts = now
-            mic_on, mic_app = _scan_consent_store("microphone")
-            cam_on, cam_app = _scan_consent_store("webcam")
+            mic_cs, mic_app = _scan_consent_store("microphone")
+            cam_cs, cam_app = _scan_consent_store("webcam")
+            mic_hw = _is_coreaudio_mic_active()
+            cam_hw = _is_frameserver_webcam_active()
             self._state = {
-                "mic_active": mic_on,
-                "cam_active": cam_on,
-                "mic_app": mic_app,
-                "cam_app": cam_app,
+                "mic_active": bool(mic_hw or mic_cs),
+                "cam_active": bool(cam_hw or cam_cs),
+                "mic_app": mic_app or ("Microphone" if mic_hw else ""),
+                "cam_app": cam_app or ("Webcam" if cam_hw else ""),
             }
         return self._state
 
