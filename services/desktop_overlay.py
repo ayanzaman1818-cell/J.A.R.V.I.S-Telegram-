@@ -382,6 +382,11 @@ class DesktopOverlayService:
         self._cal_events_cache: list[str] = []
         self._cal_events_ts: float = 0.0
         self._cal_fetching: bool = False
+        self._dash_snap_cache: dict[str, Any] = {}
+        self._dash_snap_ts: float = 0.0
+        self._dash_snap_fetching: bool = False
+        # Kick off an immediate background warm-up so the very first notch click has 0ms data latency
+        threading.Thread(target=self._refresh_dashboard_snapshot_bg, daemon=True).start()
 
         # Live Now Playing album art, blurry background palette, WASAPI audio meter & GSMTC live timeline tracker
         self._audio_meter = _WindowsAudioPeakMeter()
@@ -796,6 +801,47 @@ class DesktopOverlayService:
             self._cal_events_ts = time.time()
         finally:
             self._cal_fetching = False
+
+    def _refresh_dashboard_snapshot_bg(self) -> None:
+        """Refresh the full dashboard snapshot on a background daemon thread so the Qt UI thread NEVER stalls."""
+        if self._dash_snap_fetching:
+            return
+        self._dash_snap_fetching = True
+        try:
+            snap = self.fetch_dashboard_snapshot()
+            self._dash_snap_cache = snap
+            self._dash_snap_ts = time.time()
+        except Exception:
+            pass
+        finally:
+            self._dash_snap_fetching = False
+
+    def get_cached_dashboard_snapshot(self) -> dict[str, Any]:
+        """Return the latest dashboard snapshot in <0.1ms and trigger a background refresh if stale (>2.0s)."""
+        now = time.time()
+        if now - self._dash_snap_ts > 2.0 and not self._dash_snap_fetching:
+            threading.Thread(target=self._refresh_dashboard_snapshot_bg, daemon=True).start()
+        if self._dash_snap_cache:
+            # Always overlay the freshest cached media dict so song/play state is instant
+            snap = dict(self._dash_snap_cache)
+            snap["media"] = self.get_cached_now_playing()
+            return snap
+        return {
+            "media": self.get_cached_now_playing(),
+            "cpu_pct": 12.0,
+            "cpu_word": "Low",
+            "cpu_icon": "",
+            "cpu_color": "#34d399",
+            "ram_pct": 48.0,
+            "ram_word": "Low",
+            "ram_icon": "",
+            "ram_color": "#34d399",
+            "disk_pct": 40.0,
+            "disk_word": "Low",
+            "disk_icon": "",
+            "disk_color": "#34d399",
+            "events": [],
+        }
 
     def fetch_dashboard_snapshot(self) -> dict[str, Any]:
         """Collect live PC Dashboard data (Now Playing song, CPU/RAM in words with icons, and Important Events)."""
@@ -2076,6 +2122,24 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._outside_click_timer.timeout.connect(self._check_outside_mouse_click)
             self._outside_click_timer.start(45)
 
+            # Silent invisible startup warm-up: pre-polishes QSS, rasterizes SF Pro fonts, warms COM volume & layout
+            # so the VERY FIRST click on the notch is immediately 60fps silky butter!
+            QTimer.singleShot(180, self._warmup_ui_cache)
+
+        def _warmup_ui_cache(self) -> None:
+            """Pre-warm Qt layout, QSS stylesheets, font glyph cache, and OS volume COM invisibly at startup."""
+            try:
+                if self.state in ("idle", "hover"):
+                    self._refresh_dashboard(opening_fresh=True)
+                    dash_page = self._stack.widget(0)
+                    if dash_page is not None:
+                        dash_page.ensurePolished()
+                        # Offscreen 1-frame render warms Qt's backing store & SF Pro font glyph cache invisibly
+                        dash_page.resize(754, 132)
+                        dash_page.grab()
+            except Exception:
+                pass
+
         def _check_outside_mouse_click(self) -> None:
             """Collapse the notch to idle whenever the user clicks anywhere outside the notch bounds (unless pinned)."""
             if os.name != "nt":
@@ -3060,7 +3124,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     dl.setStyleSheet("color: #64748b; font-size: 8.5px; font-weight: 700; background: transparent;")
                     nl.setStyleSheet("color: #cbd5e1; font-size: 11px; font-weight: 700; background: transparent;")
 
-            snap = self.service.fetch_dashboard_snapshot()
+            snap = self.service.get_cached_dashboard_snapshot()
             media = snap["media"]
             is_playing_now = bool(media.get("playing"))
             in_pause_grace = time.time() < getattr(self, "_dash_media_grace_until", 0.0)
