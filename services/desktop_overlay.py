@@ -2301,15 +2301,15 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
             m_info = QVBoxLayout()
             m_info.setSpacing(2)
-            m_info.setContentsMargins(0, 4, 0, 2)
+            m_info.setContentsMargins(0, 4, 4, 2)
 
             self._dash_media_track = QLabel("Nothing Playing")
-            self._dash_media_track.setFixedWidth(148)
+            self._dash_media_track.setFixedWidth(132)
             self._dash_media_track.setStyleSheet(
-                "color: #ffffff; font-size: 13.5px; font-weight: 800; background: transparent;"
+                "color: #ffffff; font-size: 13px; font-weight: 800; background: transparent;"
             )
             self._dash_media_artist = QLabel("Spotify Idle")
-            self._dash_media_artist.setFixedWidth(148)
+            self._dash_media_artist.setFixedWidth(132)
             self._dash_media_artist.setStyleSheet(
                 "color: #94a3b8; font-size: 11px; font-weight: 600; background: transparent;"
             )
@@ -2338,9 +2338,9 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             ctrl_row.addStretch(1)
             m_info.addLayout(ctrl_row)
 
-            # Subtle sleek progress accent bar underneath controls
+            # Subtle sleek progress accent bar underneath controls (stays cleanly left of the divider!)
             prog_track = QFrame()
-            prog_track.setFixedSize(136, 3)
+            prog_track.setFixedSize(124, 3)
             prog_track.setStyleSheet("background: rgba(255,255,255,0.14); border-radius: 1.5px;")
             m_info.addSpacing(4)
             m_info.addWidget(prog_track)
@@ -2554,11 +2554,18 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 artist_part, song_part = (p.strip() for p in raw_track.split(" - ", 1))
             else:
                 song_part, artist_part = raw_track.strip(), str(media.get("source") or "Spotify Idle")
-            # Pixel-accurate eliding with QFontMetrics so long song titles & artist names never clip or distort layout
-            fm_song = self._dash_media_track.fontMetrics()
-            elided_song = fm_song.elidedText(song_part, Qt.TextElideMode.ElideRight, 142)
-            fm_art = self._dash_media_artist.fontMetrics()
-            elided_artist = fm_art.elidedText(artist_part, Qt.TextElideMode.ElideRight, 142)
+            # Pixel-accurate eliding using the exact bold stylesheet font so long song names NEVER cross the divider line
+            from PySide6.QtGui import QFontMetrics
+            song_font = QFont("SF Pro Display")
+            song_font.setPixelSize(13)
+            song_font.setWeight(QFont.Weight.ExtraBold)
+            elided_song = QFontMetrics(song_font).elidedText(song_part, Qt.TextElideMode.ElideRight, 122)
+
+            art_font = QFont("SF Pro Display")
+            art_font.setPixelSize(11)
+            art_font.setWeight(QFont.Weight.DemiBold)
+            elided_artist = QFontMetrics(art_font).elidedText(artist_part, Qt.TextElideMode.ElideRight, 122)
+
             self._dash_media_track.setText(elided_song)
             self._dash_media_track.setToolTip(song_part)
             self._dash_media_artist.setText(elided_artist)
