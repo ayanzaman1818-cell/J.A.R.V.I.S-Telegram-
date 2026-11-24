@@ -51,11 +51,16 @@ def _ensure_stdlib_before_pyside() -> None:
 
 
 class _WindowsAudioPeakMeter:
-    """Zero-dependency Win32 CoreAudio IAudioMeterInformation reader for 60fps real-time music visualizer sync."""
+    """Zero-dependency Win32 CoreAudio reader for both IAudioMeterInformation (visualizer) and IAudioEndpointVolume (exact system volume)."""
 
     def __init__(self) -> None:
         self._meter_ptr: Any = None
         self._get_peak_fn: Any = None
+        self._vol_ptr: Any = None
+        self._set_vol_fn: Any = None
+        self._get_vol_fn: Any = None
+        self._set_mute_fn: Any = None
+        self._get_mute_fn: Any = None
         self._initialized = False
 
     def _ensure_init(self) -> None:
@@ -64,7 +69,7 @@ class _WindowsAudioPeakMeter:
         self._initialized = True
         try:
             import uuid
-            from ctypes import POINTER, Structure, byref, c_float, c_uint, c_void_p, HRESULT
+            from ctypes import POINTER, Structure, byref, c_float, c_int, c_uint, c_void_p, HRESULT
             from ctypes.wintypes import DWORD
 
             class _GUID(Structure):
@@ -86,6 +91,7 @@ class _WindowsAudioPeakMeter:
             clsid_enum = _GUID("{BCDE0395-E52F-467C-8E3D-C4579291692E}")
             iid_enum = _GUID("{A95664D2-9614-4F35-A746-DE8DB63617E6}")
             iid_meter = _GUID("{C02216F6-8C67-4B5B-9D00-D008E73E0064}")
+            iid_vol = _GUID("{5CDF2C82-841E-4546-9722-0CF74078229A}")
 
             ole32 = ctypes.windll.ole32
             ole32.CoInitialize(None)
@@ -99,15 +105,26 @@ class _WindowsAudioPeakMeter:
                 return
             dev_vt = ctypes.cast(ctypes.cast(dev_ptr, POINTER(c_void_p))[0], POINTER(c_void_p))
             activate = ctypes.WINFUNCTYPE(HRESULT, c_void_p, POINTER(_GUID), DWORD, c_void_p, POINTER(c_void_p))(dev_vt[3])
+
             meter_ptr = c_void_p()
-            if activate(dev_ptr, byref(iid_meter), 23, None, byref(meter_ptr)) != 0:
-                return
-            meter_vt = ctypes.cast(ctypes.cast(meter_ptr, POINTER(c_void_p))[0], POINTER(c_void_p))
-            self._meter_ptr = meter_ptr
-            self._get_peak_fn = ctypes.WINFUNCTYPE(HRESULT, c_void_p, POINTER(c_float))(meter_vt[3])
+            if activate(dev_ptr, byref(iid_meter), 23, None, byref(meter_ptr)) == 0:
+                meter_vt = ctypes.cast(ctypes.cast(meter_ptr, POINTER(c_void_p))[0], POINTER(c_void_p))
+                self._meter_ptr = meter_ptr
+                self._get_peak_fn = ctypes.WINFUNCTYPE(HRESULT, c_void_p, POINTER(c_float))(meter_vt[3])
+
+            vol_ptr = c_void_p()
+            if activate(dev_ptr, byref(iid_vol), 23, None, byref(vol_ptr)) == 0:
+                vol_vt = ctypes.cast(ctypes.cast(vol_ptr, POINTER(c_void_p))[0], POINTER(c_void_p))
+                self._vol_ptr = vol_ptr
+                # IAudioEndpointVolume vtable: 7=SetMasterVolumeLevelScalar, 9=GetMasterVolumeLevelScalar, 14=SetMute, 15=GetMute
+                self._set_vol_fn = ctypes.WINFUNCTYPE(HRESULT, c_void_p, c_float, c_void_p)(vol_vt[7])
+                self._get_vol_fn = ctypes.WINFUNCTYPE(HRESULT, c_void_p, POINTER(c_float))(vol_vt[9])
+                self._set_mute_fn = ctypes.WINFUNCTYPE(HRESULT, c_void_p, c_int, c_void_p)(vol_vt[14])
+                self._get_mute_fn = ctypes.WINFUNCTYPE(HRESULT, c_void_p, POINTER(c_int))(vol_vt[15])
         except Exception:
             self._meter_ptr = None
             self._get_peak_fn = None
+            self._vol_ptr = None
 
     def get_peak(self) -> float:
         """Return the instantaneous master audio output peak amplitude in [0.0, 1.0]."""
@@ -121,6 +138,44 @@ class _WindowsAudioPeakMeter:
         except Exception:
             pass
         return 0.0
+
+    def get_master_volume(self) -> tuple[float, bool]:
+        """Return (scalar_level_0_to_1, is_muted) directly from Windows CoreAudio IAudioEndpointVolume."""
+        self._ensure_init()
+        if not self._vol_ptr or not self._get_vol_fn:
+            return 0.5, False
+        try:
+            lvl = ctypes.c_float(0.5)
+            muted = ctypes.c_int(0)
+            self._get_vol_fn(self._vol_ptr, ctypes.byref(lvl))
+            if self._get_mute_fn:
+                self._get_mute_fn(self._vol_ptr, ctypes.byref(muted))
+            return max(0.0, min(1.0, float(lvl.value))), bool(muted.value)
+        except Exception:
+            return 0.5, False
+
+    def set_master_volume(self, level: float) -> None:
+        """Set exact Windows master volume scalar (0.0 .. 1.0) immediately via IAudioEndpointVolume."""
+        self._ensure_init()
+        if not self._vol_ptr or not self._set_vol_fn:
+            return
+        try:
+            clamped = max(0.0, min(1.0, float(level)))
+            self._set_vol_fn(self._vol_ptr, ctypes.c_float(clamped), None)
+            if self._set_mute_fn and clamped > 0.005:
+                self._set_mute_fn(self._vol_ptr, ctypes.c_int(0), None)
+        except Exception:
+            pass
+
+    def set_mute(self, muted: bool) -> None:
+        """Set exact Windows master mute state via IAudioEndpointVolume."""
+        self._ensure_init()
+        if not self._vol_ptr or not self._set_mute_fn:
+            return
+        try:
+            self._set_mute_fn(self._vol_ptr, ctypes.c_int(1 if muted else 0), None)
+        except Exception:
+            pass
 
 
 class _WindowsMicRecorder:
@@ -1511,50 +1566,60 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 p.drawPolygon(tri)
 
     class _VerticalVolumeBar(QWidget):
-        """Interactive vertical pill volume slider (like DockBar / macOS Control Center) on the far right of the notch."""
+        """Interactive vertical pill volume slider synced 1:1 with real Windows CoreAudio IAudioEndpointVolume."""
 
-        def __init__(self, parent: QWidget | None = None) -> None:
+        def __init__(self, audio_meter: _WindowsAudioPeakMeter, parent: QWidget | None = None) -> None:
             super().__init__(parent)
-            self.setFixedSize(22, 108)
+            self._audio = audio_meter
+            self.setFixedSize(26, 108)
             self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            self.setToolTip("Click or drag to adjust volume · Right-click to mute")
-            self._level: float = 0.65
-            self._muted: bool = False
+            self.setToolTip("Click, drag, or scroll to set exact Windows volume · Right-click to mute")
+            self._level, self._muted = self._audio.get_master_volume()
             self._dragging: bool = False
 
+        def sync_from_os(self) -> None:
+            """Pull the live Windows master volume & mute state so the slider always shows the exact OS level."""
+            if self._dragging:
+                return
+            lvl, muted = self._audio.get_master_volume()
+            if abs(lvl - self._level) > 0.005 or muted != self._muted:
+                self._level = lvl
+                self._muted = muted
+                self.update()
+
         def _apply_vol_from_y(self, y: float) -> None:
-            top_y = 14.0
+            top_y = 15.0
             bot_y = float(self.height()) - 18.0
             new_lvl = max(0.0, min(1.0, (bot_y - y) / max(1.0, bot_y - top_y)))
-            delta = new_lvl - self._level
             self._level = new_lvl
-            self._muted = new_lvl <= 0.01
+            self._muted = new_lvl <= 0.005
+            self._audio.set_master_volume(new_lvl)
+            if self._muted:
+                self._audio.set_mute(True)
             self.update()
-            # Nudge Windows volume keys in proportion to drag/click
-            steps = int(round(abs(delta) * 18))
-            if steps >= 1:
-                act = "volume_up" if delta > 0 else "volume_down"
-                def _nudge() -> None:
-                    try:
-                        from tools.pc_control import _VK_MAP, _send_vk
-                        _send_vk(_VK_MAP[act], min(10, steps))
-                    except Exception:
-                        pass
-                threading.Thread(target=_nudge, daemon=True).start()
+
+        def wheelEvent(self, event: Any) -> None:
+            delta = 0.04 if event.angleDelta().y() > 0 else -0.04
+            new_lvl = max(0.0, min(1.0, self._level + delta))
+            self._level = new_lvl
+            self._muted = new_lvl <= 0.005
+            self._audio.set_master_volume(new_lvl)
+            self.update()
+            event.accept()
 
         def mousePressEvent(self, event: Any) -> None:
             if event.button() == Qt.MouseButton.RightButton:
                 self._muted = not self._muted
+                self._audio.set_mute(self._muted)
                 self.update()
-                def _mute() -> None:
-                    try:
-                        from tools.pc_control import _VK_MAP, _send_vk
-                        _send_vk(_VK_MAP["mute"], 1)
-                    except Exception:
-                        pass
-                threading.Thread(target=_mute, daemon=True).start()
                 return
             if event.button() == Qt.MouseButton.LeftButton:
+                # Clicking the speaker icon at the bottom toggles mute
+                if float(event.position().y()) >= float(self.height()) - 18.0:
+                    self._muted = not self._muted
+                    self._audio.set_mute(self._muted)
+                    self.update()
+                    return
                 self._dragging = True
                 self._apply_vol_from_y(float(event.position().y()))
 
@@ -2398,7 +2463,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             row.addLayout(sys_col)
 
             # ================= SECTION 4: VERTICAL VOLUME SLIDER + JARVIS / VOICE / CONNECTIONS / PIN =================
-            self._vol_slider = _VerticalVolumeBar()
+            self._vol_slider = _VerticalVolumeBar(self.service._audio_meter)
             row.addWidget(self._vol_slider, alignment=Qt.AlignmentFlag.AlignVCenter)
 
             right_grid = QVBoxLayout()
@@ -2454,7 +2519,12 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
             now = datetime.now(config.get_zoneinfo())
             self._dash_month_lbl.setText(now.strftime("%b"))
-            self._dash_clock_lbl.setText(now.strftime("%H:%M"))
+            # 12-hour clock format without leading zero (e.g. "2:55 PM")
+            h12 = now.hour % 12 or 12
+            ampm = "AM" if now.hour < 12 else "PM"
+            self._dash_clock_lbl.setText(f"{h12}:{now.minute:02d} {ampm}")
+            if hasattr(self, "_vol_slider"):
+                self._vol_slider.sync_from_os()
 
             # Populate 7-day week strip (Mon..Sun of current week) with today highlighted in bright blue & weekends in red
             monday = now - _td(days=now.weekday())
