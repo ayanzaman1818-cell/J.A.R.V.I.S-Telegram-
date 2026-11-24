@@ -2033,30 +2033,44 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawPath(squircle)
 
-    def _draw_timer_icon(p: QPainter, cx: float, cy: float, r: float) -> None:
-        """Hand-drawn orange countdown Timer vector icon (countdown ring arc + radial hand + top crown)."""
+    def _draw_timer_icon(
+        p: QPainter,
+        cx: float,
+        cy: float,
+        r: float,
+        exact_sec: float = 0.0,
+        frac: float = 0.75,
+    ) -> None:
+        """Hand-drawn orange countdown Timer vector icon with 60fps rotating hand & live countdown arc."""
         orange = QColor("#ff9f0a")
-        orange_dim = QColor(255, 159, 10, 75)
+        orange_dim = QColor(255, 159, 10, 72)
         p.save()
+        bc_y = cy + 0.8
+        dial_r = QRectF(cx - r, bc_y - r, r * 2.0, r * 2.0)
         # Subtle full track ring
-        p.setPen(QPen(orange_dim, 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setPen(QPen(orange_dim, 1.45, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         p.setBrush(Qt.BrushStyle.NoBrush)
-        dial_r = QRectF(cx - r, cy - r + 0.8, r * 2.0, r * 2.0)
         p.drawEllipse(dial_r)
-        # Bright orange 265-degree countdown sweep arc (starts at 12 o'clock)
+        # Bright orange live countdown sweep arc (shrinks smoothly at 60fps from 12 o'clock)
+        span_deg = -max(0.0, min(360.0, frac * 360.0))
         p.setPen(QPen(orange, 1.75, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        p.drawArc(dial_r, 90 * 16, -265 * 16)
+        p.drawArc(dial_r, 90 * 16, int(round(span_deg * 16.0)))
         # Small top timer crown notch
-        p.drawLine(QPointF(cx - r * 0.36, cy - r - 1.2), QPointF(cx + r * 0.36, cy - r - 1.2))
-        # Center dot + countdown hand pointing to ~10 o'clock
-        p.drawLine(QPointF(cx, cy + 0.8), QPointF(cx - r * 0.42, cy - r * 0.25))
+        p.drawLine(QPointF(cx - r * 0.36, bc_y - r - 1.8), QPointF(cx + r * 0.36, bc_y - r - 1.8))
+        # 60fps rotating hand matching exact remaining seconds on the 60s dial
+        sec_frac = (exact_sec % 60.0) / 60.0
+        angle = -math.pi / 2.0 + 2.0 * math.pi * sec_frac
+        hx = cx + math.cos(angle) * (r * 0.66)
+        hy = bc_y + math.sin(angle) * (r * 0.66)
+        p.setPen(QPen(orange, 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(QPointF(cx, bc_y), QPointF(hx, hy))
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(orange)
-        p.drawEllipse(QPointF(cx, cy + 0.8), 1.25, 1.25)
+        p.drawEllipse(QPointF(cx, bc_y), 1.25, 1.25)
         p.restore()
 
-    def _draw_stopwatch_icon(p: QPainter, cx: float, cy: float, r: float) -> None:
-        """Hand-drawn orange Stopwatch vector icon (bezel + top T-pusher + angled lap pusher + diagonal needle)."""
+    def _draw_stopwatch_icon(p: QPainter, cx: float, cy: float, r: float, exact_sec: float = 0.0) -> None:
+        """Hand-drawn orange Stopwatch vector icon with 60fps sweeping chronograph needle."""
         orange = QColor("#ff9f0a")
         p.save()
         p.setPen(QPen(orange, 1.55, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
@@ -2074,8 +2088,12 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
         px1 = cx + math.cos(ang) * (r + 2.0)
         py1 = bc_y + math.sin(ang) * (r + 2.0)
         p.drawLine(QPointF(px0, py0), QPointF(px1, py1))
-        # Sharp diagonal stopwatch hand pointing up-right (2 o'clock)
-        p.drawLine(QPointF(cx, bc_y), QPointF(cx + r * 0.48, bc_y - r * 0.48))
+        # 60fps clockwise sweeping stopwatch needle matching exact elapsed seconds
+        sec_frac = (exact_sec % 60.0) / 60.0
+        needle_ang = -math.pi / 2.0 + 2.0 * math.pi * sec_frac
+        nx = cx + math.cos(needle_ang) * (r * 0.72)
+        ny = bc_y + math.sin(needle_ang) * (r * 0.72)
+        p.drawLine(QPointF(cx, bc_y), QPointF(nx, ny))
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(orange)
         p.drawEllipse(QPointF(cx, bc_y), 1.35, 1.35)
@@ -2430,18 +2448,19 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
             # Poll Windows Clock app for active Timer / Stopwatch in background (0ms on UI thread)
             self.service._clock_tracker.trigger_poll_async()
-            clock_active, clock_mode, clock_fmt = self.service._clock_tracker.current_state()
+            clock_active, clock_mode, clock_fmt, clock_sec, clock_frac = self.service._clock_tracker.current_state()
             prev_clock_active = getattr(self, "_clock_active", False)
             self._clock_mode = clock_mode
             self._clock_fmt = clock_fmt
+            self._clock_exact_sec = clock_sec
+            self._clock_frac = clock_frac
             if clock_active != prev_clock_active:
                 self._clock_active = clock_active
                 if self.state in ("idle", "hover"):
                     self._animate_to(self.state, duration_ms=480)
             elif clock_active and not is_playing and self.state in ("idle", "hover"):
-                if clock_fmt != getattr(self, "_last_clock_fmt_drawn", ""):
-                    self._last_clock_fmt_drawn = clock_fmt
-                    self.update()
+                # Repaint at full 60fps so the Timer/Stopwatch hands & countdown arc rotate silky smooth!
+                self.update()
 
             # Sync Play/Pause vector glyph in Dashboard
             if hasattr(self, "_dash_play_btn"):
@@ -2836,10 +2855,12 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     icon_cx = div_x + 12.5
                     icon_cy = nh / 2.0
                     c_mode = getattr(self, "_clock_mode", "timer")
+                    c_sec = getattr(self, "_clock_exact_sec", 0.0)
+                    c_frac = getattr(self, "_clock_frac", 0.75)
                     if c_mode == "stopwatch":
-                        _draw_stopwatch_icon(p, icon_cx, icon_cy, 5.2)
+                        _draw_stopwatch_icon(p, icon_cx, icon_cy, 5.2, c_sec)
                     else:
-                        _draw_timer_icon(p, icon_cx, icon_cy, 5.2)
+                        _draw_timer_icon(p, icon_cx, icon_cy, 5.2, c_sec, c_frac)
 
                     c_font = QFont("SF Pro Display", 8, QFont.Weight.Bold)
                     p.setFont(c_font)
@@ -2860,10 +2881,12 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 icon_cx = left + 16.0
                 icon_cy = nh / 2.0
                 c_mode = getattr(self, "_clock_mode", "timer")
+                c_sec = getattr(self, "_clock_exact_sec", 0.0)
+                c_frac = getattr(self, "_clock_frac", 0.75)
                 if c_mode == "stopwatch":
-                    _draw_stopwatch_icon(p, icon_cx, icon_cy, 5.6)
+                    _draw_stopwatch_icon(p, icon_cx, icon_cy, 5.6, c_sec)
                 else:
-                    _draw_timer_icon(p, icon_cx, icon_cy, 5.6)
+                    _draw_timer_icon(p, icon_cx, icon_cy, 5.6, c_sec, c_frac)
 
                 c_font = QFont("SF Pro Display", 9, QFont.Weight.Bold)
                 p.setFont(c_font)

@@ -200,6 +200,7 @@ class WindowsClockTracker:
         self._active: bool = False
         self._mode: str = ""  # "timer" or "stopwatch"
         self._due_ts: float = 0.0
+        self._timer_total_sec: float = 60.0
         self._base_seconds: float = 0.0
         self._updated_ts: float = 0.0
         self._last_poll_ts: float = 0.0
@@ -221,9 +222,18 @@ class WindowsClockTracker:
                 data = query_windows_clock_sync()
                 with self._lock:
                     if data["active"]:
+                        new_mode = str(data["mode"])
+                        new_due = float(data["due_ts"])
+                        if new_mode == "timer":
+                            rem_now = max(1.0, new_due - time.time())
+                            # Reset total duration if a brand-new timer was started (due_ts shifted by >2s)
+                            if (not self._active) or self._mode != "timer" or abs(new_due - self._due_ts) > 2.0:
+                                self._timer_total_sec = rem_now
+                            else:
+                                self._timer_total_sec = max(self._timer_total_sec, rem_now)
                         self._active = True
-                        self._mode = str(data["mode"])
-                        self._due_ts = float(data["due_ts"])
+                        self._mode = new_mode
+                        self._due_ts = new_due
                         self._base_seconds = float(data["seconds"])
                         self._updated_ts = float(data["ts"])
                     else:
@@ -241,27 +251,32 @@ class WindowsClockTracker:
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def current_state(self) -> tuple[bool, str, str]:
-        """Return (is_active, mode ['timer'|'stopwatch'|''], formatted_time) at 60fps without blocking."""
+    def current_state(self) -> tuple[bool, str, str, float, float]:
+        """Return (is_active, mode, formatted_time, exact_seconds, timer_fraction_0_to_1) at 60fps."""
         with self._lock:
             active = self._active
             mode = self._mode
             due_ts = self._due_ts
+            total_dur = self._timer_total_sec
             base_sec = self._base_seconds
             updated = self._updated_ts
 
         if not active or not mode:
-            return False, "", ""
+            return False, "", "", 0.0, 0.0
 
         now = time.time()
         if mode == "timer":
             remaining = (due_ts - self.TIMER_TOAST_OFFSET_SEC) - now
             if remaining <= 0.0:
-                return False, "", ""
+                return False, "", "", 0.0, 0.0
+            exact_sec = remaining
+            frac = max(0.0, min(1.0, remaining / max(1.0, total_dur)))
             total_s = int(remaining)
         else:
             elapsed = max(0.0, now - updated)
-            total_s = int(base_sec + elapsed)
+            exact_sec = base_sec + elapsed
+            frac = (exact_sec % 60.0) / 60.0
+            total_s = int(exact_sec)
 
         h, rem = divmod(total_s, 3600)
         m, s = divmod(rem, 60)
@@ -269,4 +284,4 @@ class WindowsClockTracker:
             fmt = f"{h}:{m:02d}:{s:02d}"
         else:
             fmt = f"{m:02d}:{s:02d}"
-        return True, mode, fmt
+        return True, mode, fmt, exact_sec, frac
