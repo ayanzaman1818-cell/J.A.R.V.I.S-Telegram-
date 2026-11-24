@@ -391,7 +391,9 @@ class DesktopOverlayService:
         # Live Now Playing album art, blurry background palette, WASAPI audio meter & GSMTC live timeline tracker
         self._audio_meter = _WindowsAudioPeakMeter()
         from services.media_timeline import MediaTimelineTracker
+        from services.clock_tracker import WindowsClockTracker
         self._media_timeline = MediaTimelineTracker()
+        self._clock_tracker = WindowsClockTracker()
         self._now_playing_state: dict[str, Any] = {
             "playing": False,
             "track": "No song playing right now",
@@ -2031,6 +2033,54 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawPath(squircle)
 
+    def _draw_timer_icon(p: QPainter, cx: float, cy: float, r: float) -> None:
+        """Hand-drawn orange countdown Timer vector icon (countdown ring arc + radial hand + top crown)."""
+        orange = QColor("#ff9f0a")
+        orange_dim = QColor(255, 159, 10, 75)
+        p.save()
+        # Subtle full track ring
+        p.setPen(QPen(orange_dim, 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        dial_r = QRectF(cx - r, cy - r + 0.8, r * 2.0, r * 2.0)
+        p.drawEllipse(dial_r)
+        # Bright orange 265-degree countdown sweep arc (starts at 12 o'clock)
+        p.setPen(QPen(orange, 1.75, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawArc(dial_r, 90 * 16, -265 * 16)
+        # Small top timer crown notch
+        p.drawLine(QPointF(cx - r * 0.36, cy - r - 1.2), QPointF(cx + r * 0.36, cy - r - 1.2))
+        # Center dot + countdown hand pointing to ~10 o'clock
+        p.drawLine(QPointF(cx, cy + 0.8), QPointF(cx - r * 0.42, cy - r * 0.25))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(orange)
+        p.drawEllipse(QPointF(cx, cy + 0.8), 1.25, 1.25)
+        p.restore()
+
+    def _draw_stopwatch_icon(p: QPainter, cx: float, cy: float, r: float) -> None:
+        """Hand-drawn orange Stopwatch vector icon (bezel + top T-pusher + angled lap pusher + diagonal needle)."""
+        orange = QColor("#ff9f0a")
+        p.save()
+        p.setPen(QPen(orange, 1.55, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        # Main stopwatch bezel shifted 1px down to fit the top pusher
+        bc_y = cy + 1.0
+        p.drawEllipse(QPointF(cx, bc_y), r, r)
+        # Top stem + T-cap start/stop button at 12 o'clock
+        p.drawLine(QPointF(cx, bc_y - r), QPointF(cx, bc_y - r - 2.1))
+        p.drawLine(QPointF(cx - r * 0.45, bc_y - r - 2.1), QPointF(cx + r * 0.45, bc_y - r - 2.1))
+        # Angled side lap pusher at ~1:30 o'clock
+        ang = -math.pi / 4.0
+        px0 = cx + math.cos(ang) * (r + 0.2)
+        py0 = bc_y + math.sin(ang) * (r + 0.2)
+        px1 = cx + math.cos(ang) * (r + 2.0)
+        py1 = bc_y + math.sin(ang) * (r + 2.0)
+        p.drawLine(QPointF(px0, py0), QPointF(px1, py1))
+        # Sharp diagonal stopwatch hand pointing up-right (2 o'clock)
+        p.drawLine(QPointF(cx, bc_y), QPointF(cx + r * 0.48, bc_y - r * 0.48))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(orange)
+        p.drawEllipse(QPointF(cx, bc_y), 1.35, 1.35)
+        p.restore()
+
     class _DynamicNotchWindow(QWidget):
         """Fixed-canvas top-center Dynamic Island Notch window. Never shifts `x`; morphs symmetrically from center."""
 
@@ -2042,10 +2092,14 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
         # Target visual notch dimensions (width, height) inside the fixed 860x540 canvas
         SIZES: dict[str, tuple[int, int]] = {
             "tucked": (76, 3),         # Ultra-thin 3px top edge micro-line when cursor approaches tabs/titlebar below
-            "idle": (96, 7),           # Compact micro-strip at top center when no music is playing
-            "idle_music": (236, 24),   # Sleek horizontal music strip: Squircle Album Cover + Live Track & Progress + Visualizer
-            "hover": (176, 20),        # Slightly larger hovered pill with status dot + JARVIS text
-            "hover_music": (248, 25),  # Hovered horizontal music strip
+            "idle": (96, 7),               # Compact micro-strip at top center when no music or clock is active
+            "idle_clock": (152, 24),       # Orange Timer/Stopwatch icon on left + orange time on right
+            "idle_music": (236, 24),       # Sleek horizontal music strip: Squircle Album Cover + Live Track & Progress + Visualizer
+            "idle_music_clock": (316, 24), # Wider horizontal music strip + orange Timer/Stopwatch on the right!
+            "hover": (176, 20),            # Slightly larger hovered pill with status dot + JARVIS text
+            "hover_clock": (172, 25),      # Hovered Timer/Stopwatch pill
+            "hover_music": (248, 25),      # Hovered horizontal music strip
+            "hover_music_clock": (338, 25),# Hovered wider music + Timer/Stopwatch strip
             "dashboard": (548, 142),   # Compact horizontal Dashboard when NO audio is playing (Calendar + System Monitor + Volume + Icons)
             "dashboard_music": (790, 146), # Wide horizontal Dashboard WITH Media Player when audio is playing!
             "suggestions": (488, 516), # Connections hub card
@@ -2374,6 +2428,21 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 # 20-second pause grace timer just expired -> smoothly magnet-retract the Music Tab back into the notch!
                 self._set_dashboard_music_expanded(should_show_dash_music)
 
+            # Poll Windows Clock app for active Timer / Stopwatch in background (0ms on UI thread)
+            self.service._clock_tracker.trigger_poll_async()
+            clock_active, clock_mode, clock_fmt = self.service._clock_tracker.current_state()
+            prev_clock_active = getattr(self, "_clock_active", False)
+            self._clock_mode = clock_mode
+            self._clock_fmt = clock_fmt
+            if clock_active != prev_clock_active:
+                self._clock_active = clock_active
+                if self.state in ("idle", "hover"):
+                    self._animate_to(self.state, duration_ms=480)
+            elif clock_active and not is_playing and self.state in ("idle", "hover"):
+                if clock_fmt != getattr(self, "_last_clock_fmt_drawn", ""):
+                    self._last_clock_fmt_drawn = clock_fmt
+                    self.update()
+
             # Sync Play/Pause vector glyph in Dashboard
             if hasattr(self, "_dash_play_btn"):
                 if self._dash_play_btn.is_playing != is_playing:
@@ -2447,10 +2516,18 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 key = "dashboard_music"
             elif new_state == "idle" and getattr(self, "_tucked_dodge", False):
                 key = "tucked"
+            elif new_state == "idle" and getattr(self, "_music_playing_active", False) and getattr(self, "_clock_active", False):
+                key = "idle_music_clock"
             elif new_state == "idle" and getattr(self, "_music_playing_active", False):
                 key = "idle_music"
+            elif new_state == "idle" and getattr(self, "_clock_active", False):
+                key = "idle_clock"
+            elif new_state == "hover" and getattr(self, "_music_playing_active", False) and getattr(self, "_clock_active", False):
+                key = "hover_music_clock"
             elif new_state == "hover" and getattr(self, "_music_playing_active", False):
                 key = "hover_music"
+            elif new_state == "hover" and getattr(self, "_clock_active", False):
+                key = "hover_clock"
             else:
                 key = new_state
             tw, th = self.SIZES.get(key, self.SIZES["idle"])
@@ -2663,13 +2740,15 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawPath(art_clip)
 
-                # 3. Right Side geometry (calculated before center so the song title & progress bar never collide)
+                # 3. Right Side geometry (if Timer/Stopwatch is active, reserve an orange clock zone on the far right!)
+                clock_active = bool(getattr(self, "_clock_active", False)) and bool(getattr(self, "_clock_fmt", ""))
+                clock_zone_w = 78.0 if clock_active else 0.0
                 bars = self._vis_bars
                 bar_w = 2.6
                 gap = 2.1
                 vis_total_w = len(bars) * bar_w + (len(bars) - 1) * gap
                 vis_right_pad = 10.0
-                vis_start_x = right - vis_right_pad - vis_total_w
+                vis_start_x = right - clock_zone_w - vis_right_pad - vis_total_w
 
                 # 2. Center: Live Track Title (smooth marquee for long titles) + Live Album-Tinted Progress Hairline
                 center_left = art_x + art_size + 8.0
@@ -2747,6 +2826,54 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     # Crisp inner bar
                     p.setBrush(QBrush(bar_grad))
                     p.drawRoundedRect(QRectF(bx, by, bar_w, bh), 1.3, 1.3)
+
+                # 4. Optional Far-Right Orange Windows Clock Timer / Stopwatch Zone (when BOTH music & clock are active)
+                if clock_active:
+                    div_x = right - clock_zone_w - 2.0
+                    p.setPen(QPen(QColor(255, 159, 10, 72), 1.0))
+                    p.drawLine(QPointF(div_x, 5.0), QPointF(div_x, nh - 5.0))
+
+                    icon_cx = div_x + 12.5
+                    icon_cy = nh / 2.0
+                    c_mode = getattr(self, "_clock_mode", "timer")
+                    if c_mode == "stopwatch":
+                        _draw_stopwatch_icon(p, icon_cx, icon_cy, 5.2)
+                    else:
+                        _draw_timer_icon(p, icon_cx, icon_cy, 5.2)
+
+                    c_font = QFont("SF Pro Display", 8, QFont.Weight.Bold)
+                    p.setFont(c_font)
+                    p.setPen(QColor("#ff9f0a"))
+                    c_txt = getattr(self, "_clock_fmt", "")
+                    p.drawText(
+                        QRectF(icon_cx + 8.5, 0.0, right - (icon_cx + 8.5) - 9.0, nh),
+                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                        c_txt,
+                    )
+
+                p.restore()
+            elif self.state in ("idle", "hover") and getattr(self, "_clock_active", False) and nh >= 13:
+                # --- Standalone Orange Windows Clock Timer / Stopwatch Notch (Icon on left, Time on right) ---
+                p.save()
+                p.setClipPath(path)
+
+                icon_cx = left + 16.0
+                icon_cy = nh / 2.0
+                c_mode = getattr(self, "_clock_mode", "timer")
+                if c_mode == "stopwatch":
+                    _draw_stopwatch_icon(p, icon_cx, icon_cy, 5.6)
+                else:
+                    _draw_timer_icon(p, icon_cx, icon_cy, 5.6)
+
+                c_font = QFont("SF Pro Display", 9, QFont.Weight.Bold)
+                p.setFont(c_font)
+                p.setPen(QColor("#ff9f0a"))
+                c_txt = getattr(self, "_clock_fmt", "")
+                p.drawText(
+                    QRectF(left + 28.0, 0.0, nw - 40.0, nh),
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                    c_txt,
+                )
 
                 p.restore()
             elif self.state == "hover":
