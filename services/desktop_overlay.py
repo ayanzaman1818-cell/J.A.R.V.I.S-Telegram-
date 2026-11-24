@@ -788,14 +788,36 @@ class DesktopOverlayService:
             except Exception:
                 pass
 
+        disk_pct = 0.0
+        try:
+            import shutil as _shutil
+            usage = _shutil.disk_usage(config.BASE_DIR)
+            if usage.total > 0:
+                disk_pct = round((usage.used / usage.total) * 100.0, 1)
+        except Exception:
+            disk_pct = 0.0
+
+        if disk_pct < 60.0:
+            disk_word, disk_icon, disk_color = "Low", "🟢", "#34d399"
+        elif disk_pct < 85.0:
+            disk_word, disk_icon, disk_color = "Normal", "🟠", "#f59e0b"
+        else:
+            disk_word, disk_icon, disk_color = "High", "🔴", "#f87171"
+
         return {
             "media": media,
+            "cpu_pct": round(cpu_pct, 1),
             "cpu_word": cpu_word,
             "cpu_icon": cpu_icon,
             "cpu_color": cpu_color,
+            "ram_pct": round(ram_pct, 1),
             "ram_word": ram_word,
             "ram_icon": ram_icon,
             "ram_color": ram_color,
+            "disk_pct": disk_pct,
+            "disk_word": disk_word,
+            "disk_icon": disk_icon,
+            "disk_color": disk_color,
             "events": events[:3],
         }
 
@@ -1083,7 +1105,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
     )
 
     # Fixed motionless canvas dimensions anchored at top center of the primary screen
-    CANVAS_W = 580
+    CANVAS_W = 860
     CANVAS_H = 540
 
     class _VectorIconButton(QPushButton):
@@ -1488,6 +1510,100 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 tri = QPolygonF([QPointF(19.0, 16.0), QPointF(19.0, 30.0), QPointF(29.5, 23.0)])
                 p.drawPolygon(tri)
 
+    class _VerticalVolumeBar(QWidget):
+        """Interactive vertical pill volume slider (like DockBar / macOS Control Center) on the far right of the notch."""
+
+        def __init__(self, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self.setFixedSize(22, 108)
+            self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            self.setToolTip("Click or drag to adjust volume · Right-click to mute")
+            self._level: float = 0.65
+            self._muted: bool = False
+            self._dragging: bool = False
+
+        def _apply_vol_from_y(self, y: float) -> None:
+            top_y = 14.0
+            bot_y = float(self.height()) - 18.0
+            new_lvl = max(0.0, min(1.0, (bot_y - y) / max(1.0, bot_y - top_y)))
+            delta = new_lvl - self._level
+            self._level = new_lvl
+            self._muted = new_lvl <= 0.01
+            self.update()
+            # Nudge Windows volume keys in proportion to drag/click
+            steps = int(round(abs(delta) * 18))
+            if steps >= 1:
+                act = "volume_up" if delta > 0 else "volume_down"
+                def _nudge() -> None:
+                    try:
+                        from tools.pc_control import _VK_MAP, _send_vk
+                        _send_vk(_VK_MAP[act], min(10, steps))
+                    except Exception:
+                        pass
+                threading.Thread(target=_nudge, daemon=True).start()
+
+        def mousePressEvent(self, event: Any) -> None:
+            if event.button() == Qt.MouseButton.RightButton:
+                self._muted = not self._muted
+                self.update()
+                def _mute() -> None:
+                    try:
+                        from tools.pc_control import _VK_MAP, _send_vk
+                        _send_vk(_VK_MAP["mute"], 1)
+                    except Exception:
+                        pass
+                threading.Thread(target=_mute, daemon=True).start()
+                return
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._dragging = True
+                self._apply_vol_from_y(float(event.position().y()))
+
+        def mouseMoveEvent(self, event: Any) -> None:
+            if self._dragging:
+                self._apply_vol_from_y(float(event.position().y()))
+
+        def mouseReleaseEvent(self, event: Any) -> None:
+            self._dragging = False
+            super().mouseReleaseEvent(event)
+
+        def paintEvent(self, _event: Any) -> None:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            w, h = float(self.width()), float(self.height())
+
+            # Top numeric label ("100" / "65")
+            p.setPen(QColor("#cbd5e1"))
+            f = QFont("SF Pro Display", 7, QFont.Weight.Bold)
+            p.setFont(f)
+            pct_txt = "0" if self._muted else str(int(round(self._level * 100)))
+            p.drawText(QRectF(0, 0, w, 12), Qt.AlignmentFlag.AlignCenter, pct_txt)
+
+            # Vertical track
+            track_w = 12.0
+            track_x = (w - track_w) / 2.0
+            track_top = 15.0
+            track_h = h - 33.0
+            track_rect = QRectF(track_x, track_top, track_w, track_h)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(255, 255, 255, 28))
+            p.drawRoundedRect(track_rect, 6.0, 6.0)
+
+            # Active blue fill from bottom up
+            fill_lvl = 0.0 if self._muted else self._level
+            fill_h = max(0.0, track_h * fill_lvl)
+            if fill_h > 2.0:
+                fill_rect = QRectF(track_x, track_top + track_h - fill_h, track_w, fill_h)
+                fg = QLinearGradient(0, fill_rect.top(), 0, fill_rect.bottom())
+                fg.setColorAt(0.0, QColor("#93c5fd"))
+                fg.setColorAt(1.0, QColor("#60a5fa"))
+                p.setBrush(QBrush(fg))
+                p.drawRoundedRect(fill_rect, 6.0, 6.0)
+
+            # Bottom speaker glyph
+            p.setPen(QColor("#94a3b8"))
+            p.setFont(QFont("Segoe UI Emoji", 8))
+            p.drawText(QRectF(0, h - 16, w, 16), Qt.AlignmentFlag.AlignCenter, "🔇" if self._muted else "🔊")
+
     class _DynamicNotchWindow(QWidget):
         """Fixed-canvas top-center Dynamic Island Notch window. Never shifts `x`; morphs symmetrically from center."""
 
@@ -1496,17 +1612,17 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
         composio_link_ready = Signal(str, str, str)
         shutdown_requested = Signal()
 
-        # Target visual notch dimensions (width, height) inside the fixed 580x540 canvas
+        # Target visual notch dimensions (width, height) inside the fixed 860x540 canvas
         SIZES: dict[str, tuple[int, int]] = {
             "tucked": (76, 3),         # Ultra-thin 3px top edge micro-line when cursor approaches tabs/titlebar below
             "idle": (96, 7),           # Compact micro-strip at top center when no music is playing
-            "idle_music": (212, 23),   # Sleek horizontal music strip: wide horizontally, slight vertical height for album cover + visualizer
+            "idle_music": (212, 23),   # Sleek horizontal music strip: Album Cover + JARVIS + Blurry-Color Visualizer
             "hover": (176, 20),        # Slightly larger hovered pill with status dot + JARVIS text
             "hover_music": (248, 25),  # Hovered horizontal music strip
-            "dashboard": (536, 430),   # Home PC Dashboard (Now Playing, CPU/RAM in words, Important Events)
-            "suggestions": (468, 516), # Connections hub card
-            "chat": (536, 336),        # JARVIS Quick Chat card
-            "chat_active": (536, 468), # JARVIS Quick Chat card with active conversation
+            "dashboard": (790, 146),   # Wide sleek DockBar-style horizontal PC Dashboard strip!
+            "suggestions": (488, 516), # Connections hub card
+            "chat": (556, 336),        # JARVIS Quick Chat card
+            "chat_active": (556, 468), # JARVIS Quick Chat card with active conversation
             "voice": (448, 276),       # Voice Cloud Orb card
         }
         EAR_RADIUS = 16
@@ -2101,203 +2217,231 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._refresh_dashboard()
 
         def _build_dashboard_page(self) -> QWidget:
-            """PC Home Dashboard: Now Playing Song + CPU/RAM Health IN WORDS with icons + Important Events."""
+            """Wide DockBar-style Horizontal Notch Dashboard:
+            [Album Art + Track/Artist + ⏮⏯⏭] | [Month + 7-Day Week Strip + Clock + Event] | [System Monitor: CPU/RAM/DISK bars] | [Volume Bar] [AI / Voice / Connections / Pin]
+            """
             page = QWidget()
-            layout = QVBoxLayout(page)
-            layout.setContentsMargins(6, 2, 6, 6)
-            layout.setSpacing(10)
+            outer = QVBoxLayout(page)
+            outer.setContentsMargins(6, 4, 6, 4)
+            outer.setSpacing(4)
 
-            # Top Navigation Bar: [Home (Active)] [JARVIS Icon] [Connections Icon]  ---  [Time/Date]  ---  [Voice] [Pin] [Close]
-            top = QHBoxLayout()
-            top.setSpacing(6)
-            btn_home = _VectorIconButton("home", "PC Dashboard Home")
-            btn_home.active_state = True
-            btn_jarvis = _VectorIconButton("chat", "Open JARVIS AI Chat")
-            btn_jarvis.clicked.connect(lambda: self._animate_to("chat", duration_ms=460))
-            btn_conn = _VectorIconButton(
-                "connections",
-                "Composio App Connections Hub",
-                badge_count=0,
-            )
-            btn_conn.clicked.connect(lambda: self._animate_to("suggestions", duration_ms=460))
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(12)
 
-            self._dash_clock_lbl = QLabel("PC Dashboard")
-            self._dash_clock_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._dash_clock_lbl.setStyleSheet(
-                "color: #e2e8f0; font-size: 12px; font-weight: 800; "
-                "background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); "
-                "border-radius: 10px; padding: 4px 12px;"
-            )
-
-            btn_wave = _VectorIconButton("waveform", "Voice Orb Mode")
-            btn_wave.clicked.connect(self._enter_voice_mode)
-            self._pin_btn_dash = _VectorIconButton("pin", "Pin Overlay Open")
-            self._pin_btn_dash.clicked.connect(self._toggle_pin)
-            btn_collapse = _VectorIconButton("close", "Collapse to Top Notch (Esc)")
-            btn_collapse.clicked.connect(lambda: self._animate_to("idle", duration_ms=460))
-
-            top.addWidget(btn_home)
-            top.addWidget(btn_jarvis)
-            top.addWidget(btn_conn)
-            top.addStretch(1)
-            top.addWidget(self._dash_clock_lbl)
-            top.addStretch(1)
-            top.addWidget(btn_wave)
-            top.addWidget(self._pin_btn_dash)
-            top.addWidget(btn_collapse)
-            layout.addLayout(top)
-
-            # 1. NOW PLAYING MEDIA CARD
-            media_card = QFrame()
-            media_card.setFixedHeight(78)
-            media_card.setStyleSheet(
-                "QFrame { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, "
-                "stop:0 rgba(16, 185, 129, 0.14), stop:1 rgba(15, 23, 42, 0.72)); "
-                "border: 1px solid rgba(52, 211, 153, 0.32); border-radius: 16px; }"
-            )
-            ml = QHBoxLayout(media_card)
-            ml.setContentsMargins(14, 10, 14, 10)
-            ml.setSpacing(12)
+            # ================= SECTION 1: NOW PLAYING (Left) =================
+            media_wrap = QHBoxLayout()
+            media_wrap.setSpacing(10)
 
             self._dash_music_icon = QLabel("🎵")
-            self._dash_music_icon.setFixedSize(44, 44)
+            self._dash_music_icon.setFixedSize(78, 78)
             self._dash_music_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._dash_music_icon.setStyleSheet(
-                "background: rgba(16, 185, 129, 0.22); border: 1px solid rgba(52, 211, 153, 0.45); "
-                "border-radius: 12px; font-size: 20px;"
+                "background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.14); "
+                "border-radius: 14px; font-size: 28px;"
             )
-            ml.addWidget(self._dash_music_icon)
+            media_wrap.addWidget(self._dash_music_icon, alignment=Qt.AlignmentFlag.AlignVCenter)
 
-            m_text_col = QVBoxLayout()
-            m_text_col.setSpacing(1)
-            self._dash_media_source = QLabel("SPOTIFY · PLAYING NOW")
-            self._dash_media_source.setStyleSheet(
-                "color: #6ee7b7; font-size: 9.5px; font-weight: 800; letter-spacing: 0.8px; border: none; background: transparent;"
-            )
-            self._dash_media_track = QLabel("No song playing right now")
+            m_info = QVBoxLayout()
+            m_info.setSpacing(2)
+            m_info.setContentsMargins(0, 4, 0, 2)
+
+            self._dash_media_track = QLabel("Nothing Playing")
+            self._dash_media_track.setFixedWidth(148)
             self._dash_media_track.setStyleSheet(
-                "color: #ffffff; font-size: 14px; font-weight: 800; border: none; background: transparent;"
+                "color: #ffffff; font-size: 13.5px; font-weight: 800; background: transparent;"
             )
-            self._dash_media_artist = QLabel("")
+            self._dash_media_artist = QLabel("Spotify Idle")
+            self._dash_media_artist.setFixedWidth(148)
             self._dash_media_artist.setStyleSheet(
-                "color: #94a3b8; font-size: 12px; font-weight: 600; border: none; background: transparent;"
+                "color: #94a3b8; font-size: 11px; font-weight: 600; background: transparent;"
             )
-            self._dash_media_artist.hide()
-            m_text_col.addWidget(self._dash_media_source)
-            m_text_col.addWidget(self._dash_media_track)
-            m_text_col.addWidget(self._dash_media_artist)
-            ml.addLayout(m_text_col, stretch=1)
+            m_info.addWidget(self._dash_media_track)
+            m_info.addWidget(self._dash_media_artist)
+            m_info.addSpacing(4)
 
-            # Media transport controls (Prev / Play-Pause / Next)
             ctrl_row = QHBoxLayout()
-            ctrl_row.setSpacing(5)
-            for sym, act, tip in (("⏮", "prev_track", "Previous / Rewind Track"), ("⏯", "play_pause", "Play / Pause"), ("⏭", "next_track", "Next / Fast-Forward Track")):
+            ctrl_row.setSpacing(6)
+            for sym, act, tip in (
+                ("⏮", "prev_track", "Previous Track"),
+                ("⏯", "play_pause", "Play / Pause"),
+                ("⏭", "next_track", "Next Track"),
+            ):
                 b = QPushButton(sym)
-                b.setFixedSize(30, 30)
+                b.setFixedSize(30, 26)
                 b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
                 b.setToolTip(tip)
                 b.setStyleSheet(
-                    "QPushButton { background: rgba(255,255,255,0.09); color: #ffffff; "
-                    "border: 1px solid rgba(255,255,255,0.16); border-radius: 10px; font-size: 13px; }"
-                    "QPushButton:hover { background: rgba(52, 211, 153, 0.28); border: 1px solid #34d399; }"
+                    "QPushButton { background: rgba(255,255,255,0.08); color: #f8fafc; "
+                    "border: none; border-radius: 7px; font-size: 12px; }"
+                    "QPushButton:hover { background: rgba(255,255,255,0.20); }"
                 )
                 b.clicked.connect(lambda _c=False, a=act: self._on_dash_media_control(a))
                 ctrl_row.addWidget(b)
-            ml.addLayout(ctrl_row)
-            layout.addWidget(media_card)
+            ctrl_row.addStretch(1)
+            m_info.addLayout(ctrl_row)
 
-            # 2. SYSTEM HEALTH ROW (CPU USAGE & RAM USAGE IN WORDS WITH ICONS)
-            health_row = QHBoxLayout()
-            health_row.setSpacing(10)
+            # Subtle sleek progress accent bar underneath controls
+            prog_track = QFrame()
+            prog_track.setFixedSize(136, 3)
+            prog_track.setStyleSheet("background: rgba(255,255,255,0.14); border-radius: 1.5px;")
+            m_info.addSpacing(4)
+            m_info.addWidget(prog_track)
+            m_info.addStretch(1)
 
-            self._cpu_card = QFrame()
-            self._cpu_card.setFixedHeight(80)
-            self._cpu_card.setStyleSheet(
-                "QFrame { background: rgba(255, 255, 255, 0.045); "
-                "border: 1px solid rgba(255, 255, 255, 0.11); border-radius: 16px; }"
+            media_wrap.addLayout(m_info)
+            row.addLayout(media_wrap)
+
+            # Vertical hairline divider 1
+            div1 = QFrame()
+            div1.setFixedSize(1, 86)
+            div1.setStyleSheet("background: rgba(255,255,255,0.12);")
+            row.addWidget(div1, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+            # ================= SECTION 2: CALENDAR STRIP + LIVE CLOCK + NEXT EVENT (Center) =================
+            cal_col = QVBoxLayout()
+            cal_col.setSpacing(4)
+            cal_col.setContentsMargins(2, 2, 2, 0)
+
+            top_cal_row = QHBoxLayout()
+            top_cal_row.setSpacing(10)
+
+            self._dash_month_lbl = QLabel("Nov")
+            self._dash_month_lbl.setStyleSheet(
+                "color: #ffffff; font-size: 24px; font-weight: 800; background: transparent;"
             )
-            cl = QHBoxLayout(self._cpu_card)
-            cl.setContentsMargins(14, 10, 14, 10)
-            cl.setSpacing(10)
-            cpu_icon_lbl = QLabel("⚡")
-            cpu_icon_lbl.setFixedSize(40, 40)
-            cpu_icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            cpu_icon_lbl.setStyleSheet(
-                "background: rgba(56, 189, 248, 0.16); border: 1px solid rgba(56, 189, 248, 0.35); "
-                "border-radius: 12px; font-size: 19px;"
+            top_cal_row.addWidget(self._dash_month_lbl, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+            # 7-day calendar strip (M T W T F S S)
+            week_row = QHBoxLayout()
+            week_row.setSpacing(5)
+            self._dash_week_day_lbls: list[QLabel] = []
+            self._dash_week_num_lbls: list[QLabel] = []
+            for _ in range(7):
+                dc = QVBoxLayout()
+                dc.setSpacing(1)
+                dc.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                dl = QLabel("M")
+                dl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                dl.setStyleSheet("color: #64748b; font-size: 8.5px; font-weight: 700; background: transparent;")
+                nl = QLabel("1")
+                nl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                nl.setStyleSheet("color: #e2e8f0; font-size: 11px; font-weight: 700; background: transparent;")
+                dc.addWidget(dl)
+                dc.addWidget(nl)
+                week_row.addLayout(dc)
+                self._dash_week_day_lbls.append(dl)
+                self._dash_week_num_lbls.append(nl)
+            top_cal_row.addLayout(week_row)
+            cal_col.addLayout(top_cal_row)
+
+            # Crisp Centered Clock + Next Event Pill
+            self._dash_clock_lbl = QLabel("14:48")
+            self._dash_clock_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._dash_clock_lbl.setStyleSheet(
+                "color: #ffffff; font-size: 19px; font-weight: 800; letter-spacing: 0.6px; background: transparent;"
             )
-            cl.addWidget(cpu_icon_lbl)
-            cpu_col = QVBoxLayout()
-            cpu_col.setSpacing(2)
-            cpu_hdr = QLabel("CPU USAGE")
-            cpu_hdr.setStyleSheet("color: #94a3b8; font-size: 10.5px; font-weight: 800; border: none; background: transparent;")
-            self._dash_cpu_word = QLabel("🟢 Low")
-            self._dash_cpu_word.setStyleSheet("color: #34d399; font-size: 17px; font-weight: 800; border: none; background: transparent;")
-            cpu_col.addWidget(cpu_hdr)
-            cpu_col.addWidget(self._dash_cpu_word)
-            cl.addLayout(cpu_col, stretch=1)
+            cal_col.addWidget(self._dash_clock_lbl)
 
-            self._ram_card = QFrame()
-            self._ram_card.setFixedHeight(80)
-            self._ram_card.setStyleSheet(
-                "QFrame { background: rgba(255, 255, 255, 0.045); "
-                "border: 1px solid rgba(255, 255, 255, 0.11); border-radius: 16px; }"
+            self._dash_event_pill = QLabel("✨ No urgent events")
+            self._dash_event_pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._dash_event_pill.setStyleSheet(
+                "color: #93c5fd; font-size: 10px; font-weight: 700; background: transparent;"
             )
-            rl = QHBoxLayout(self._ram_card)
-            rl.setContentsMargins(14, 10, 14, 10)
-            rl.setSpacing(10)
-            ram_icon_lbl = QLabel("🧠")
-            ram_icon_lbl.setFixedSize(40, 40)
-            ram_icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            ram_icon_lbl.setStyleSheet(
-                "background: rgba(168, 85, 247, 0.16); border: 1px solid rgba(168, 85, 247, 0.35); "
-                "border-radius: 12px; font-size: 19px;"
+            cal_col.addWidget(self._dash_event_pill)
+            row.addLayout(cal_col)
+
+            # Vertical hairline divider 2
+            div2 = QFrame()
+            div2.setFixedSize(1, 86)
+            div2.setStyleSheet("background: rgba(255,255,255,0.12);")
+            row.addWidget(div2, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+            # ================= SECTION 3: SYSTEM MONITOR (CPU / RAM / DISK BARS + WORDS) =================
+            sys_col = QVBoxLayout()
+            sys_col.setSpacing(6)
+            sys_col.setContentsMargins(2, 4, 2, 2)
+
+            sys_hdr_row = QHBoxLayout()
+            sys_title = QLabel("🖥  System Monitor")
+            sys_title.setStyleSheet("color: #f8fafc; font-size: 11px; font-weight: 800; background: transparent;")
+            self._dash_health_badge = QLabel("OK")
+            self._dash_health_badge.setStyleSheet(
+                "background: rgba(34, 197, 94, 0.22); color: #4ade80; "
+                "border-radius: 5px; padding: 1px 6px; font-size: 9px; font-weight: 800;"
             )
-            rl.addWidget(ram_icon_lbl)
-            ram_col = QVBoxLayout()
-            ram_col.setSpacing(2)
-            ram_hdr = QLabel("RAM USAGE")
-            ram_hdr.setStyleSheet("color: #94a3b8; font-size: 10.5px; font-weight: 800; border: none; background: transparent;")
-            self._dash_ram_word = QLabel("🔵 Normal")
-            self._dash_ram_word.setStyleSheet("color: #38bdf8; font-size: 17px; font-weight: 800; border: none; background: transparent;")
-            ram_col.addWidget(ram_hdr)
-            ram_col.addWidget(self._dash_ram_word)
-            rl.addLayout(ram_col, stretch=1)
+            sys_hdr_row.addWidget(sys_title)
+            sys_hdr_row.addStretch(1)
+            sys_hdr_row.addWidget(self._dash_health_badge)
+            sys_col.addLayout(sys_hdr_row)
 
-            health_row.addWidget(self._cpu_card, stretch=1)
-            health_row.addWidget(self._ram_card, stretch=1)
-            layout.addLayout(health_row)
+            def _make_metric_row(icon: str, name: str, bar_color: str) -> tuple[QHBoxLayout, QFrame, QLabel]:
+                mr = QHBoxLayout()
+                mr.setSpacing(6)
+                lbl = QLabel(f"{icon} {name}")
+                lbl.setFixedWidth(48)
+                lbl.setStyleSheet("color: #cbd5e1; font-size: 10px; font-weight: 700; background: transparent;")
+                track = QFrame()
+                track.setFixedSize(76, 5)
+                track.setStyleSheet("background: rgba(255,255,255,0.12); border-radius: 2.5px;")
+                fill = QFrame(track)
+                fill.setGeometry(0, 0, 24, 5)
+                fill.setStyleSheet(f"background: {bar_color}; border-radius: 2.5px;")
+                word_lbl = QLabel("Low")
+                word_lbl.setFixedWidth(48)
+                word_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                word_lbl.setStyleSheet(f"color: {bar_color}; font-size: 10px; font-weight: 800; background: transparent;")
+                mr.addWidget(lbl)
+                mr.addWidget(track)
+                mr.addWidget(word_lbl)
+                return mr, fill, word_lbl
 
-            # 3. IMPORTANT EVENTS CARD (Calendar + Reminders + Priority Tasks)
-            events_card = QFrame()
-            events_card.setStyleSheet(
-                "QFrame { background: rgba(255, 255, 255, 0.04); "
-                "border: 1px solid rgba(255, 255, 255, 0.10); border-radius: 16px; }"
-            )
-            el = QVBoxLayout(events_card)
-            el.setContentsMargins(14, 10, 14, 10)
-            el.setSpacing(6)
+            cpu_r, self._dash_cpu_bar, self._dash_cpu_word = _make_metric_row("⚡", "CPU", "#38bdf8")
+            ram_r, self._dash_ram_bar, self._dash_ram_word = _make_metric_row("🧠", "RAM", "#4ade80")
+            dsk_r, self._dash_disk_bar, self._dash_disk_word = _make_metric_row("💾", "DISK", "#f59e0b")
+            sys_col.addLayout(cpu_r)
+            sys_col.addLayout(ram_r)
+            sys_col.addLayout(dsk_r)
+            sys_col.addStretch(1)
+            row.addLayout(sys_col)
 
-            ev_hdr_row = QHBoxLayout()
-            ev_title = QLabel("📅  IMPORTANT EVENTS & SCHEDULE")
-            ev_title.setStyleSheet(
-                "color: #93c5fd; font-size: 11px; font-weight: 800; letter-spacing: 0.6px; border: none; background: transparent;"
-            )
-            ev_hdr_row.addWidget(ev_title)
-            ev_hdr_row.addStretch(1)
-            el.addLayout(ev_hdr_row)
+            # ================= SECTION 4: VERTICAL VOLUME SLIDER + JARVIS / VOICE / CONNECTIONS / PIN =================
+            self._vol_slider = _VerticalVolumeBar()
+            row.addWidget(self._vol_slider, alignment=Qt.AlignmentFlag.AlignVCenter)
 
-            self._dash_event_labels: list[QLabel] = []
-            for _ in range(3):
-                lbl = QLabel("")
-                lbl.setWordWrap(False)
-                lbl.setStyleSheet(
-                    "color: #f1f5f9; font-size: 13px; font-weight: 600; padding: 3px 0; border: none; background: transparent;"
-                )
-                el.addWidget(lbl)
-                self._dash_event_labels.append(lbl)
+            right_grid = QVBoxLayout()
+            right_grid.setSpacing(5)
+            right_grid.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-            layout.addWidget(events_card, stretch=1)
+            btn_jarvis = _VectorIconButton("chat", "Open JARVIS AI Quick Chat", size=28)
+            btn_jarvis.clicked.connect(lambda: self._animate_to("chat", duration_ms=460))
+            btn_wave = _VectorIconButton("waveform", "Live Voice Cloud Orb Mode", size=28)
+            btn_wave.clicked.connect(self._enter_voice_mode)
+            btn_conn = _VectorIconButton("connections", "Composio App Connections Hub", size=28)
+            btn_conn.clicked.connect(lambda: self._animate_to("suggestions", duration_ms=460))
+            self._pin_btn_dash = _VectorIconButton("pin", "Pin Notch Open", size=28)
+            self._pin_btn_dash.clicked.connect(self._toggle_pin)
+
+            top_r_btns = QHBoxLayout()
+            top_r_btns.setSpacing(5)
+            top_r_btns.addWidget(btn_jarvis)
+            top_r_btns.addWidget(btn_wave)
+            bot_r_btns = QHBoxLayout()
+            bot_r_btns.setSpacing(5)
+            bot_r_btns.addWidget(btn_conn)
+            bot_r_btns.addWidget(self._pin_btn_dash)
+
+            right_grid.addLayout(top_r_btns)
+            right_grid.addLayout(bot_r_btns)
+            row.addLayout(right_grid)
+
+            outer.addLayout(row, stretch=1)
+
+            # Bottom subtle drag/grabber pill (just like the reference image!)
+            grabber = QFrame()
+            grabber.setFixedSize(44, 3)
+            grabber.setStyleSheet("background: rgba(255,255,255,0.28); border-radius: 1.5px;")
+            outer.addWidget(grabber, alignment=Qt.AlignmentFlag.AlignHCenter)
             return page
 
         def _on_dash_media_control(self, action: str) -> None:
@@ -2313,33 +2457,52 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             QTimer.singleShot(420, self._refresh_dashboard)
 
         def _refresh_dashboard(self) -> None:
-            """Update the PC Home Dashboard labels with live Now Playing song, CPU/RAM in words, and Important Events."""
-            now_str = datetime.now(config.get_zoneinfo()).strftime("%a %d %b  ·  %I:%M %p")
-            self._dash_clock_lbl.setText(now_str)
+            """Update the wide DockBar-style Horizontal Dashboard with live Media, 7-Day Calendar, Clock, Events & System Monitor."""
+            from datetime import timedelta as _td
+
+            now = datetime.now(config.get_zoneinfo())
+            self._dash_month_lbl.setText(now.strftime("%b"))
+            self._dash_clock_lbl.setText(now.strftime("%H:%M"))
+
+            # Populate 7-day week strip (Mon..Sun of current week) with today highlighted in bright blue & weekends in red
+            monday = now - _td(days=now.weekday())
+            day_letters = ("M", "T", "W", "T", "F", "S", "S")
+            for idx in range(7):
+                d = monday + _td(days=idx)
+                is_today = d.date() == now.date()
+                is_weekend = idx >= 5
+                dl = self._dash_week_day_lbls[idx]
+                nl = self._dash_week_num_lbls[idx]
+                dl.setText(now.strftime("%a").upper() if is_today else day_letters[idx])
+                nl.setText(str(d.day))
+                if is_today:
+                    dl.setStyleSheet("color: #f8fafc; font-size: 8.5px; font-weight: 800; background: transparent;")
+                    nl.setStyleSheet("color: #60a5fa; font-size: 13px; font-weight: 900; background: transparent;")
+                elif is_weekend:
+                    dl.setStyleSheet("color: #ef4444; font-size: 8.5px; font-weight: 700; background: transparent;")
+                    nl.setStyleSheet("color: #f87171; font-size: 11px; font-weight: 700; background: transparent;")
+                else:
+                    dl.setStyleSheet("color: #64748b; font-size: 8.5px; font-weight: 700; background: transparent;")
+                    nl.setStyleSheet("color: #cbd5e1; font-size: 11px; font-weight: 700; background: transparent;")
 
             snap = self.service.fetch_dashboard_snapshot()
             media = snap["media"]
-            raw_track = str(media.get("track") or "No song playing right now")
-            # Spotify window titles are "Artist - Song Title"; display Song Title on top in bold white, and Artist right under it in grey!
+            raw_track = str(media.get("track") or "Nothing Playing")
             if " - " in raw_track:
                 artist_part, song_part = (p.strip() for p in raw_track.split(" - ", 1))
             else:
-                song_part, artist_part = raw_track.strip(), ""
-            if len(song_part) > 36:
-                song_part = song_part[:34] + "…"
-            if len(artist_part) > 38:
-                artist_part = artist_part[:36] + "…"
+                song_part, artist_part = raw_track.strip(), str(media.get("source") or "Spotify Idle")
+            if len(song_part) > 20:
+                song_part = song_part[:18] + "…"
+            if len(artist_part) > 22:
+                artist_part = artist_part[:20] + "…"
             self._dash_media_track.setText(song_part)
-            if artist_part:
-                self._dash_media_artist.setText(artist_part)
-                self._dash_media_artist.show()
-            else:
-                self._dash_media_artist.hide()
-            self._dash_media_source.setText(str(media.get("source") or "NOW PLAYING").upper())
+            self._dash_media_artist.setText(artist_part)
+
             if self._art_pixmap is not None and not self._art_pixmap.isNull():
                 scaled_art = self._art_pixmap.scaled(
-                    38,
-                    38,
+                    76,
+                    76,
                     Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                     Qt.TransformationMode.SmoothTransformation,
                 )
@@ -2348,34 +2511,42 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._dash_music_icon.setPixmap(QPixmap())
                 self._dash_music_icon.setText("🎧" if media.get("playing") else "🎵")
 
-            self._dash_cpu_word.setText(f"{snap['cpu_icon']}  {snap['cpu_word']}")
-            self._dash_cpu_word.setStyleSheet(
-                f"color: {snap['cpu_color']}; font-size: 17px; font-weight: 800; border: none; background: transparent;"
-            )
-            self._dash_ram_word.setText(f"{snap['ram_icon']}  {snap['ram_word']}")
-            self._dash_ram_word.setStyleSheet(
-                f"color: {snap['ram_color']}; font-size: 17px; font-weight: 800; border: none; background: transparent;"
+            # System Monitor: progress bars + Words (Low / Normal / High)
+            cpu_w = max(6, int(76.0 * min(1.0, float(snap.get("cpu_pct", 10.0)) / 100.0)))
+            ram_w = max(6, int(76.0 * min(1.0, float(snap.get("ram_pct", 50.0)) / 100.0)))
+            dsk_w = max(6, int(76.0 * min(1.0, float(snap.get("disk_pct", 40.0)) / 100.0)))
+
+            self._dash_cpu_bar.setFixedWidth(cpu_w)
+            self._dash_cpu_bar.setStyleSheet(f"background: {snap['cpu_color']}; border-radius: 2.5px;")
+            self._dash_cpu_word.setText(snap["cpu_word"])
+            self._dash_cpu_word.setStyleSheet(f"color: {snap['cpu_color']}; font-size: 10px; font-weight: 800; background: transparent;")
+
+            self._dash_ram_bar.setFixedWidth(ram_w)
+            self._dash_ram_bar.setStyleSheet(f"background: {snap['ram_color']}; border-radius: 2.5px;")
+            self._dash_ram_word.setText(snap["ram_word"])
+            self._dash_ram_word.setStyleSheet(f"color: {snap['ram_color']}; font-size: 10px; font-weight: 800; background: transparent;")
+
+            self._dash_disk_bar.setFixedWidth(dsk_w)
+            self._dash_disk_bar.setStyleSheet(f"background: {snap['disk_color']}; border-radius: 2.5px;")
+            self._dash_disk_word.setText(snap["disk_word"])
+            self._dash_disk_word.setStyleSheet(f"color: {snap['disk_color']}; font-size: 10px; font-weight: 800; background: transparent;")
+
+            is_high = snap["cpu_word"] == "High" or snap["ram_word"] == "High"
+            self._dash_health_badge.setText("HIGH" if is_high else "GOOD")
+            self._dash_health_badge.setStyleSheet(
+                f"background: {'rgba(239, 68, 68, 0.22)' if is_high else 'rgba(34, 197, 94, 0.22)'}; "
+                f"color: {'#f87171' if is_high else '#4ade80'}; "
+                "border-radius: 5px; padding: 1px 6px; font-size: 9px; font-weight: 800;"
             )
 
             events = snap.get("events") or []
-            if not events:
-                self._dash_event_labels[0].setText("✨ No urgent events or reminders right now")
-                self._dash_event_labels[0].setStyleSheet(
-                    "color: #94a3b8; font-size: 13px; font-weight: 600; padding: 3px 0; border: none; background: transparent;"
-                )
-                self._dash_event_labels[0].show()
-                for lbl in self._dash_event_labels[1:]:
-                    lbl.hide()
+            if events:
+                ev_str = str(events[0])
+                if len(ev_str) > 34:
+                    ev_str = ev_str[:32] + "…"
+                self._dash_event_pill.setText(ev_str)
             else:
-                for idx, lbl in enumerate(self._dash_event_labels):
-                    if idx < len(events):
-                        lbl.setText(events[idx])
-                        lbl.setStyleSheet(
-                            "color: #f1f5f9; font-size: 13px; font-weight: 600; padding: 3px 0; border: none; background: transparent;"
-                        )
-                        lbl.show()
-                    else:
-                        lbl.hide()
+                self._dash_event_pill.setText("✨ No urgent events today")
 
         def _build_suggestions_page(self) -> QWidget:
             page = QWidget()
