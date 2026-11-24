@@ -1,17 +1,18 @@
 """Zero-dependency Windows Clock (Microsoft.WindowsAlarms) live Timer & Stopwatch tracker.
 
-Uses Windows UI Automation (UIAutomationClient) in a non-blocking background thread
-when the Windows Clock app is open, and smoothly interpolates countdown / elapsed
-seconds at 60fps on the UI thread.
+- Timers: Reads exact scheduled timer end timestamps directly from Windows
+  ToastNotificationManager (`Microsoft.WindowsAlarms_8wekyb3d8bbwe!App`), so
+  active countdown timers are detected with millisecond accuracy EVEN WHEN the
+  Windows Clock window is minimized or closed!
+- Stopwatches: Reads active running Stopwatch via Windows UI Automation when
+  the Windows Clock window is open, and smoothly interpolates at 60fps.
 """
 
 from __future__ import annotations
 
 import base64
-import ctypes
 import logging
 import os
-import re
 import subprocess
 import threading
 import time
@@ -19,86 +20,70 @@ from typing import Any
 
 log = logging.getLogger("jarvis.clock_tracker")
 
-_PS_CLOCK_UIA_SCRIPT = r"""
-Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-$root = [System.Windows.Automation.AutomationElement]::RootElement
-$cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, 'Clock')
-$win = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $cond)
-if (-not $win) {
-    Write-Output "NONE"
-    exit 0
-}
-$all = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
-$timerTime = ""
-$timerRunning = $false
-$swTime = ""
-$swRunning = $false
-$fallbackTimes = New-Object System.Collections.Generic.List[string]
-
-foreach ($el in $all) {
-    try {
-        $aid = [string]$el.Current.AutomationId
-        $nm = [string]$el.Current.Name
-        $ct = $el.Current.ControlType.ProgrammaticName
-
-        # Detect active Timer pause button or running state
-        if (($aid -match 'Timer.*Pause|Pause.*Timer|PlayPauseButton') -and ($nm -match 'Pause')) {
-            $timerRunning = $true
-        }
-        # Detect active Stopwatch pause button
-        if (($aid -match 'Stopwatch.*Pause|StopwatchPlayPause') -and ($nm -match 'Pause')) {
-            $swRunning = $true
-        }
-        # Generic Pause button fallback (disambiguated by page text below)
-        if ($ct -eq 'ControlType.Button' -and $nm -match '^Pause') {
-            if ($aid -match 'Stopwatch') {
-                $swRunning = $true
-            } elseif ($aid -match 'Timer') {
-                $timerRunning = $true
-            } else {
-                $hasGenericPause = $true
+_PS_CLOCK_SCRIPT = r"""
+# 1. Check Windows Clock Scheduled Timer Toasts (works even when Clock app is minimized or closed!)
+$bestTimerDue = 0.0
+try {
+    [Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime] | Out-Null
+    $tn = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Microsoft.WindowsAlarms_8wekyb3d8bbwe!App')
+    $st = $tn.GetScheduledToastNotifications()
+    $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    foreach ($x in $st) {
+        $xml = ""
+        try { $xml = $x.Content.GetXml() } catch {}
+        if ($xml -match 'type=timer|TimerDoneText') {
+            $dueMs = $x.DeliveryTime.ToUnixTimeMilliseconds()
+            if ($dueMs -gt $nowMs) {
+                $dueSec = $dueMs / 1000.0
+                if ($bestTimerDue -eq 0.0 -or $dueSec -lt $bestTimerDue) {
+                    $bestTimerDue = $dueSec
+                }
             }
         }
-
-        # Extract Stopwatch time (usually HH:MM:SS.cc or MM:SS.cc or StopwatchTimerText)
-        if ($aid -match 'Stopwatch' -and $nm -match '(\d{1,2}:\d{2}:\d{2}(?:\.\d+)?|\d{1,2}:\d{2}\.\d+)') {
-            $swTime = $Matches[1]
-        } elseif ($nm -match '(\d{1,2}:\d{2}:\d{2}\.\d{1,2})') {
-            $swTime = $Matches[1]
-        }
-
-        # Extract Timer remaining time (HH:MM:SS or MM:SS)
-        if ($aid -match 'Timer' -and $nm -match '(\d{1,2}:\d{2}:\d{2}|\d{1,2}:\d{2})') {
-            if (-not $timerTime) { $timerTime = $Matches[1] }
-        } elseif ($nm -match '(\d{1,2}:\d{2}:\d{2})' -and $aid -notmatch 'Clock|World|Stopwatch') {
-            $fallbackTimes.Add($Matches[1])
-        }
-    } catch {}
-}
-
-# Disambiguate if a generic Pause button is visible on the active tab
-if ($hasGenericPause -and -not $timerRunning -and -not $swRunning) {
-    if ($swTime) {
-        $swRunning = $true
-    } elseif ($timerTime -or $fallbackTimes.Count -gt 0) {
-        $timerRunning = $true
     }
+} catch {}
+
+if ($bestTimerDue -gt 0.0) {
+    Write-Output ("MODE=timer|DUE=" + [math]::Round($bestTimerDue, 3))
+    exit 0
 }
 
-if (-not $timerTime -and $fallbackTimes.Count -gt 0) {
-    $timerTime = $fallbackTimes[0]
-}
+# 2. Check Windows Clock UI Automation for an active running Stopwatch (when Clock window is open)
+try {
+    Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+    $root = [System.Windows.Automation.AutomationElement]::RootElement
+    $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, 'Clock')
+    $win = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $cond)
+    if ($win) {
+        $all = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+        $swTime = ""
+        $swRunning = $false
+        foreach ($el in $all) {
+            try {
+                $aid = [string]$el.Current.AutomationId
+                $nm = [string]$el.Current.Name
+                $ct = $el.Current.ControlType.ProgrammaticName
+                if (($ct -eq 'ControlType.Button') -and ($nm -match '^Pause') -and ($aid -match 'Stopwatch|PlayPause')) {
+                    $swRunning = $true
+                }
+                if ($aid -match 'Stopwatch' -and $nm -match '(\d{1,2}:\d{2}:\d{2}(?:\.\d+)?|\d{1,2}:\d{2}\.\d+)') {
+                    $swTime = $Matches[1]
+                } elseif ($nm -match '(\d{1,2}:\d{2}:\d{2}\.\d{1,2})') {
+                    $swTime = $Matches[1]
+                }
+            } catch {}
+        }
+        if ($swRunning -and $swTime) {
+            Write-Output ("MODE=stopwatch|TIME=" + $swTime)
+            exit 0
+        }
+    }
+} catch {}
 
-if ($timerRunning -and $timerTime) {
-    Write-Output ("MODE=timer|RUNNING=1|TIME=" + $timerTime)
-} elseif ($swRunning -and $swTime) {
-    Write-Output ("MODE=stopwatch|RUNNING=1|TIME=" + $swTime)
-} else {
-    Write-Output "IDLE"
-}
+Write-Output "IDLE"
 """.strip()
 
-_ENCODED_CLOCK_PS = base64.b64encode(_PS_CLOCK_UIA_SCRIPT.encode("utf-16le")).decode("ascii")
+_ENCODED_CLOCK_PS = base64.b64encode(_PS_CLOCK_SCRIPT.encode("utf-16le")).decode("ascii")
 
 
 def _parse_hms_to_seconds(text: str) -> float:
@@ -117,23 +102,10 @@ def _parse_hms_to_seconds(text: str) -> float:
     return 0.0
 
 
-def _is_windows_clock_window_open() -> bool:
-    """Ultra-fast (<0.1ms) Win32 check to see if the Windows Clock app window exists."""
-    if os.name != "nt":
-        return False
-    try:
-        hwnd = ctypes.windll.user32.FindWindowW("ApplicationFrameWindow", "Clock")
-        if hwnd:
-            return True
-    except Exception:
-        pass
-    return False
-
-
 def query_windows_clock_sync() -> dict[str, Any]:
-    """Query the Windows Clock app via UIAutomation for any active running Timer or Stopwatch."""
-    if os.name != "nt" or not _is_windows_clock_window_open():
-        return {"active": False, "mode": "", "seconds": 0.0, "ts": time.time()}
+    """Query Windows Clock for an active Timer (via Scheduled Toasts) or Stopwatch (via UIA)."""
+    if os.name != "nt":
+        return {"active": False, "mode": "", "due_ts": 0.0, "seconds": 0.0, "ts": time.time()}
     try:
         res = subprocess.run(
             ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-EncodedCommand", _ENCODED_CLOCK_PS],
@@ -147,35 +119,38 @@ def query_windows_clock_sync() -> dict[str, Any]:
             line = out.splitlines()[-1]
             parts = dict(item.split("=", 1) for item in line.split("|") if "=" in item)
             mode = parts.get("MODE", "").strip().lower()
-            running = parts.get("RUNNING", "0").strip() == "1"
-            secs = _parse_hms_to_seconds(parts.get("TIME", ""))
-            if running and mode in ("timer", "stopwatch") and (secs > 0.0 or mode == "stopwatch"):
-                return {"active": True, "mode": mode, "seconds": secs, "ts": time.time()}
+            if mode == "timer":
+                due_ts = float(parts.get("DUE", "0") or 0.0)
+                if due_ts > time.time():
+                    return {"active": True, "mode": "timer", "due_ts": due_ts, "seconds": 0.0, "ts": time.time()}
+            elif mode == "stopwatch":
+                secs = _parse_hms_to_seconds(parts.get("TIME", ""))
+                return {"active": True, "mode": "stopwatch", "due_ts": 0.0, "seconds": secs, "ts": time.time()}
     except Exception:
-        log.debug("Windows Clock UIA poll failed", exc_info=True)
-    return {"active": False, "mode": "", "seconds": 0.0, "ts": time.time()}
+        log.debug("Windows Clock poll failed", exc_info=True)
+    return {"active": False, "mode": "", "due_ts": 0.0, "seconds": 0.0, "ts": time.time()}
 
 
 class WindowsClockTracker:
-    """Maintains a smooth 60fps interpolated Timer / Stopwatch state synced with the Windows Clock app."""
+    """Maintains a smooth 60fps interpolated Timer / Stopwatch state synced with Windows Clock."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._active: bool = False
         self._mode: str = ""  # "timer" or "stopwatch"
+        self._due_ts: float = 0.0
         self._base_seconds: float = 0.0
         self._updated_ts: float = 0.0
         self._last_poll_ts: float = 0.0
         self._polling: bool = False
 
     def trigger_poll_async(self) -> None:
-        """Non-blocking background poll (checks window presence in <0.1ms; queries UIA every ~1.8s when open)."""
+        """Non-blocking background poll every ~2.0s so active timers & stopwatches appear automatically."""
         now = time.time()
         with self._lock:
             if self._polling:
                 return
-            interval = 1.8 if (self._active or _is_windows_clock_window_open()) else 2.5
-            if now - self._last_poll_ts < interval:
+            if now - self._last_poll_ts < 2.0:
                 return
             self._polling = True
             self._last_poll_ts = now
@@ -186,6 +161,7 @@ class WindowsClockTracker:
                 with self._lock:
                     self._active = bool(data["active"])
                     self._mode = str(data["mode"])
+                    self._due_ts = float(data["due_ts"])
                     self._base_seconds = float(data["seconds"])
                     self._updated_ts = float(data["ts"])
             finally:
@@ -199,19 +175,22 @@ class WindowsClockTracker:
         with self._lock:
             active = self._active
             mode = self._mode
+            due_ts = self._due_ts
             base_sec = self._base_seconds
             updated = self._updated_ts
 
         if not active or not mode:
             return False, "", ""
 
-        elapsed = max(0.0, time.time() - updated)
+        now = time.time()
         if mode == "timer":
-            cur = max(0.0, base_sec - elapsed)
-            total_s = int(round(cur))
+            remaining = due_ts - now
+            if remaining <= 0.0:
+                return False, "", ""
+            total_s = int(remaining + 0.5)
         else:
-            cur = base_sec + elapsed
-            total_s = int(cur)
+            elapsed = max(0.0, now - updated)
+            total_s = int(base_sec + elapsed)
 
         h, rem = divmod(total_s, 3600)
         m, s = divmod(rem, 60)
