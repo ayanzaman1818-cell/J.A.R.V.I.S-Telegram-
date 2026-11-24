@@ -2335,6 +2335,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             t = max(0.0, min(1.0, float(val)))
             if hasattr(self, "_opacity_effect") and self._opacity_effect is not None:
                 self._opacity_effect.setOpacity(t)
+            if t <= 0.01 and self.state not in ("dashboard", "suggestions", "chat", "voice"):
+                self._content_root.hide()
 
         def _sample_top_app_color(self) -> None:
             """Sample 2 pixels immediately left & right of the notch on the active app's titlebar and compute a subtle darker/lighter shade."""
@@ -2558,9 +2560,19 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
             self._fade_anim.stop()
             if not is_expanding:
-                self._content_root.hide()
+                if was_expanded and self._content_root.isVisible():
+                    cur_op = float(self._opacity_effect.opacity())
+                    self._fade_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+                    self._fade_anim.setDuration(170)
+                    self._fade_anim.setStartValue(cur_op)
+                    self._fade_anim.setEndValue(0.0)
+                    self._fade_anim.start()
+                else:
+                    self._content_root.hide()
             else:
-                # Set _content_root to its final target geometry BEFORE showing it so Calendar & System Monitor NEVER jump!
+                # Set _content_root geometry AND initial opacity=0.0 BEFORE showing so there is ZERO 1-frame flash!
+                start_op = 0.20 if was_expanded else 0.0
+                self._opacity_effect.setOpacity(start_op)
                 pad_x = 18
                 cur_w_even = int(round(float(tw) / 2.0)) * 2
                 self._content_root.setGeometry(
@@ -2570,9 +2582,9 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     max(10, int(round(float(th))) - 14),
                 )
                 self._switch_stack_page(new_state, opening_fresh=(not was_expanded))
-                start_op = 0.25 if was_expanded else 0.0
-                self._opacity_effect.setOpacity(start_op)
-                self._fade_anim.setDuration(max(360, int(duration_ms * 0.75)))
+                # InOutCubic blooms smoothly as the notch widens (Calendar, System Monitor & Now Playing fade in organically!)
+                self._fade_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+                self._fade_anim.setDuration(360 if was_expanded else 560)
                 self._fade_anim.setStartValue(start_op)
                 self._fade_anim.setEndValue(1.0)
                 self._fade_anim.start()
