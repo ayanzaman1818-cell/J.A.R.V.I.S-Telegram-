@@ -2172,18 +2172,19 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 mask_left = (CANVAS_W - mask_w) // 2
                 self.setMask(QRegion(QRect(mask_left, 0, mask_w, mask_h)))
 
-            # Keep content container centered at its target expanded width so QHBoxLayout NEVER squeezes or jiggles sideways!
+            # Lock content container strictly to the exact target expanded width (NEVER grow with OutBack overshoot!)
+            # so the Music Tab & Dashboard widgets stay 100% rock-solid while the black notch silhouette springs around them.
             slide_offset = getattr(self, "_slide_y", 0.0)
             pad_x = 18
             _mp_anim = getattr(self, "_media_panel_anim", None)
             if _mp_anim is not None and _mp_anim.state() == QVariantAnimation.State.Running:
                 content_w_src = self._notch_w
             else:
-                content_w_src = max(self._notch_w, getattr(self, "_target_w", self._notch_w))
+                content_w_src = getattr(self, "_target_w", self._notch_w)
             cur_w_even = int(round(content_w_src / 2.0)) * 2
             left = (CANVAS_W - cur_w_even) // 2 + pad_x
             inner_w = max(10, cur_w_even - pad_x * 2)
-            inner_h = max(10, int(round(max(self._notch_h, getattr(self, "_target_h", self._notch_h)))) - 14)
+            inner_h = max(10, int(round(getattr(self, "_target_h", self._notch_h))) - 14)
             self._content_root.setGeometry(left, int(round(8.0 + slide_offset)), inner_w, inner_h)
             self.update()
 
@@ -2721,6 +2722,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
             # ================= SECTION 1: NOW PLAYING (Left — magnetically slides in/out with silky animation!) =================
             self._dash_media_container = QWidget()
+            self._dash_media_container.setMinimumWidth(0)
+            self._dash_media_container.setMaximumWidth(224)
             self._dash_media_container.setStyleSheet("background: transparent;")
             self._dash_media_opacity = QGraphicsOpacityEffect(self._dash_media_container)
             self._dash_media_opacity.setOpacity(1.0)
