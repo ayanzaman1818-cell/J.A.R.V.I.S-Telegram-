@@ -2725,9 +2725,6 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._dash_media_container.setMinimumWidth(0)
             self._dash_media_container.setMaximumWidth(224)
             self._dash_media_container.setStyleSheet("background: transparent;")
-            self._dash_media_opacity = QGraphicsOpacityEffect(self._dash_media_container)
-            self._dash_media_opacity.setOpacity(1.0)
-            self._dash_media_container.setGraphicsEffect(self._dash_media_opacity)
             media_wrap = QHBoxLayout(self._dash_media_container)
             media_wrap.setContentsMargins(0, 0, 0, 0)
             media_wrap.setSpacing(10)
@@ -2942,7 +2939,6 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             target_w = 224 if expand else 0
             if not animate:
                 self._dash_media_container.setMaximumWidth(target_w)
-                self._dash_media_opacity.setOpacity(1.0 if expand else 0.0)
                 self._dash_media_container.setVisible(expand)
                 self._dash_div1.setVisible(expand)
                 return
@@ -2984,7 +2980,6 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
         def _on_media_panel_anim(self, val: Any) -> None:
             w = max(0, int(round(float(val))))
             self._dash_media_container.setMaximumWidth(w)
-            self._dash_media_opacity.setOpacity(max(0.0, min(1.0, w / 224.0)))
 
         def _on_media_panel_anim_done(self) -> None:
             if not self._media_panel_expanded:
