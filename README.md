@@ -122,3 +122,7 @@ To launch silently in the background on Windows login, use [start_jarvis_hidden.
 - `services/llm.py` — Hybrid Local LM Studio + Google Gemini / Gemma router with smart tool pruning
 - `tools/` — PC control, media transport, web search, memory, reminders, tasks, and Composio tools
 - `assets/fonts/` — Bundled `SF Pro Display` and `SF Pro Text` fonts
+
+---
+
+*Coded using Gemini as a partner.*
