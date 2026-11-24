@@ -2461,7 +2461,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             if new_state == "hover":
                 self._start_spring_morph(float(tw), float(th), duration_ms=440, decay=6.5)
             elif new_state == "idle":
-                self._start_spring_morph(float(tw), float(th), duration_ms=500, decay=8.2)
+                self._start_spring_morph(float(tw), float(th), duration_ms=720, decay=6.4)
             elif was_expanded and is_expanding:
                 self._start_spring_morph(float(tw), float(th), duration_ms=560, decay=7.4)
             else:
