@@ -2108,8 +2108,9 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._color_sample_ts: float = 0.0
 
             self._vis_timer = QTimer(self)
+            self._vis_timer.setTimerType(Qt.TimerType.PreciseTimer)
             self._vis_timer.timeout.connect(self._on_visualizer_tick)
-            self._vis_timer.start(32)
+            self._vis_timer.start(16)
 
             self.hotkey_triggered.connect(self._on_hotkey_toggle)
             self.reply_ready.connect(self._on_reply_ready)
@@ -2371,41 +2372,26 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 if hasattr(self, "_dash_media_track"):
                     self._sync_dash_track_labels(raw_t, str(media.get("source") or "Playing"))
             else:
-                self._idle_marquee_t = getattr(self, "_idle_marquee_t", 0.0) + (1.0 / 30.0)
+                self._idle_marquee_t = getattr(self, "_idle_marquee_t", 0.0) + (1.0 / 60.0)
                 # Keep GSMTC timeline continuously synced in the background regardless of notch state
                 self.service._media_timeline.trigger_poll_async(force=False)
 
-            # Sample live Windows WASAPI master audio peak (0.0 .. 1.0) with balanced, natural responsiveness
-            raw_peak = self.service._audio_meter.get_peak()
-            prev_peak = getattr(self, "_prev_raw_peak", 0.0)
-            self._prev_raw_peak = raw_peak
+            # Real-time 60fps raw Windows WASAPI master audio peak (0.0 .. 1.0) — zero boosting or artificial gain!
+            raw_peak = max(0.0, min(1.0, float(self.service._audio_meter.get_peak())))
+            self._vis_phase += 0.11 + raw_peak * 0.16
 
-            # Gentle adaptive normalization so quiet and loud songs both sit in a natural middle range
-            run_max = getattr(self, "_vis_running_max", 0.22)
-            if raw_peak > run_max:
-                run_max = run_max * 0.65 + raw_peak * 0.35
-            else:
-                run_max = max(0.08, run_max * 0.992)
-            self._vis_running_max = run_max
-
-            norm_peak = min(1.0, raw_peak / max(0.08, run_max))
-            beat_delta = max(0.0, (raw_peak - prev_peak) / max(0.08, run_max))
-            self._vis_phase += 0.22 + norm_peak * 0.28 + beat_delta * 0.35
-
-            # Balanced energy: responsive to the beat without pegging at the top ceiling
-            energy = min(0.92, max(0.22, math.pow(norm_peak, 0.72) * 0.85 + beat_delta * 0.55))
-            freq_weights = (0.78, 1.05, 0.90, 1.10, 0.86, 0.72)
-            phase_offsets = (0.0, 1.2, 2.5, 0.8, 2.0, 3.3)
+            bar_shapes = (0.76, 0.94, 1.00, 0.92, 0.82, 0.70)
+            phase_offsets = (0.0, 1.15, 2.35, 0.75, 1.95, 3.15)
 
             for i in range(len(self._vis_bars)):
-                wave = 0.28 + 0.72 * abs(math.sin(self._vis_phase * (0.95 + i * 0.16) + phase_offsets[i]))
-                target = max(0.15, min(0.95, energy * freq_weights[i] * wave))
+                wave = 0.45 + 0.55 * abs(math.sin(self._vis_phase * (0.95 + i * 0.14) + phase_offsets[i]))
+                target = max(0.08, min(1.0, raw_peak * bar_shapes[i] * wave))
                 prev = self._vis_bars[i]
-                # Smooth, fluid attack and decay
+                # Crisp real-time 60fps attack and natural decay
                 if target > prev:
-                    self._vis_bars[i] = prev * 0.42 + target * 0.58
+                    self._vis_bars[i] = prev * 0.45 + target * 0.55
                 else:
-                    self._vis_bars[i] = prev * 0.68 + target * 0.32
+                    self._vis_bars[i] = prev * 0.75 + target * 0.25
 
             if self.state in ("idle", "hover"):
                 self.update()
