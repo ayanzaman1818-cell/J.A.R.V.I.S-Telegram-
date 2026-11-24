@@ -1669,10 +1669,124 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 p.setBrush(QBrush(fg))
                 p.drawRoundedRect(fill_rect, 6.0, 6.0)
 
-            # Bottom speaker glyph
-            p.setPen(QColor("#94a3b8"))
-            p.setFont(QFont("Segoe UI Emoji", 8))
-            p.drawText(QRectF(0, h - 16, w, 16), Qt.AlignmentFlag.AlignCenter, "🔇" if self._muted else "🔊")
+            # Bottom custom hand-drawn vector speaker glyph (zero Windows emoji!)
+            sx, sy = w / 2.0, h - 8.5
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#94a3b8"))
+            spk = QPainterPath()
+            spk.moveTo(sx - 5.2, sy - 2.2)
+            spk.lineTo(sx - 2.6, sy - 2.2)
+            spk.lineTo(sx + 0.6, sy - 4.8)
+            spk.lineTo(sx + 0.6, sy + 4.8)
+            spk.lineTo(sx - 2.6, sy + 2.2)
+            spk.lineTo(sx - 5.2, sy + 2.2)
+            spk.closeSubpath()
+            p.drawPath(spk)
+            if self._muted:
+                p.setPen(QPen(QColor("#f87171"), 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(sx + 2.4, sy - 2.2), QPointF(sx + 5.6, sy + 2.2))
+                p.drawLine(QPointF(sx + 5.6, sy - 2.2), QPointF(sx + 2.4, sy + 2.2))
+            else:
+                p.setPen(QPen(QColor("#94a3b8"), 1.25, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawArc(QRectF(sx - 0.5, sy - 2.8, 4.2, 5.6), -50 * 16, 100 * 16)
+                if self._level > 0.45:
+                    p.drawArc(QRectF(sx + 0.8, sy - 4.5, 5.5, 9.0), -50 * 16, 100 * 16)
+
+    class _CustomMediaButton(QPushButton):
+        """Hand-drawn minimalist vector media transport button (prev, play_pause, next) — zero Windows emoji."""
+
+        def __init__(self, kind: str, tooltip: str = "", parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self.kind = kind
+            self.is_playing = True
+            self._hovered = False
+            self.setFixedSize(30, 26)
+            self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            self.setToolTip(tooltip)
+
+        def enterEvent(self, event: Any) -> None:
+            self._hovered = True
+            self.update()
+            super().enterEvent(event)
+
+        def leaveEvent(self, event: Any) -> None:
+            self._hovered = False
+            self.update()
+            super().leaveEvent(event)
+
+        def paintEvent(self, _event: Any) -> None:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            w, h = float(self.width()), float(self.height())
+            cx, cy = w / 2.0, h / 2.0
+
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(255, 255, 255, 42 if self._hovered else 18))
+            p.drawRoundedRect(QRectF(0.5, 0.5, w - 1.0, h - 1.0), 7.5, 7.5)
+
+            fg = QColor("#ffffff") if self._hovered else QColor("#e2e8f0")
+            p.setBrush(fg)
+            if self.kind == "prev":
+                p.drawRoundedRect(QRectF(cx - 5.8, cy - 4.6, 2.0, 9.2), 1.0, 1.0)
+                tri = QPolygonF([QPointF(cx + 4.8, cy - 4.8), QPointF(cx + 4.8, cy + 4.8), QPointF(cx - 3.2, cy)])
+                p.drawPolygon(tri)
+            elif self.kind == "next":
+                p.drawRoundedRect(QRectF(cx + 3.8, cy - 4.6, 2.0, 9.2), 1.0, 1.0)
+                tri = QPolygonF([QPointF(cx - 4.8, cy - 4.8), QPointF(cx - 4.8, cy + 4.8), QPointF(cx + 3.2, cy)])
+                p.drawPolygon(tri)
+            else:
+                if self.is_playing:
+                    p.drawRoundedRect(QRectF(cx - 4.2, cy - 5.0, 2.8, 10.0), 1.2, 1.2)
+                    p.drawRoundedRect(QRectF(cx + 1.4, cy - 5.0, 2.8, 10.0), 1.2, 1.2)
+                else:
+                    tri = QPolygonF([QPointF(cx - 3.6, cy - 5.2), QPointF(cx - 3.6, cy + 5.2), QPointF(cx + 5.2, cy)])
+                    p.drawPolygon(tri)
+
+    class _CustomMiniIcon(QWidget):
+        """Hand-drawn minimalist vector glyph (monitor, cpu, ram, disk, calendar) — zero Windows emoji."""
+
+        def __init__(self, kind: str, color: str = "#cbd5e1", size: int = 14, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self.kind = kind
+            self.color = QColor(color)
+            self.setFixedSize(size, size)
+
+        def paintEvent(self, _event: Any) -> None:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            w, h = float(self.width()), float(self.height())
+            cx, cy = w / 2.0, h / 2.0
+            pen = QPen(self.color, 1.35, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+
+            if self.kind == "monitor":
+                p.drawRoundedRect(QRectF(1.5, 2.0, w - 3.0, h - 6.0), 2.0, 2.0)
+                p.drawLine(QPointF(cx, h - 4.0), QPointF(cx, h - 1.5))
+                p.drawLine(QPointF(cx - 3.2, h - 1.5), QPointF(cx + 3.2, h - 1.5))
+            elif self.kind == "cpu":
+                p.drawRoundedRect(QRectF(3.5, 3.5, w - 7.0, h - 7.0), 1.6, 1.6)
+                for offset in (-2.0, 2.0):
+                    p.drawLine(QPointF(cx + offset, 1.2), QPointF(cx + offset, 3.3))
+                    p.drawLine(QPointF(cx + offset, h - 3.3), QPointF(cx + offset, h - 1.2))
+                    p.drawLine(QPointF(1.2, cy + offset), QPointF(3.3, cy + offset))
+                    p.drawLine(QPointF(w - 3.3, cy + offset), QPointF(w - 1.2, cy + offset))
+            elif self.kind == "ram":
+                p.drawRoundedRect(QRectF(1.6, 3.5, w - 3.2, h - 7.0), 1.5, 1.5)
+                p.drawLine(QPointF(cx - 2.2, 5.2), QPointF(cx - 2.2, h - 5.2))
+                p.drawLine(QPointF(cx + 2.2, 5.2), QPointF(cx + 2.2, h - 5.2))
+                for dx in (-3.0, 0.0, 3.0):
+                    p.drawLine(QPointF(cx + dx, h - 3.5), QPointF(cx + dx, h - 1.6))
+            elif self.kind == "disk":
+                p.drawRoundedRect(QRectF(2.2, 1.8, w - 4.4, h - 3.6), 2.2, 2.2)
+                p.drawEllipse(QPointF(cx, cy - 1.0), 2.2, 2.2)
+                p.drawLine(QPointF(cx - 2.2, h - 3.6), QPointF(cx + 2.2, h - 3.6))
+            elif self.kind == "calendar":
+                p.drawRoundedRect(QRectF(1.8, 2.8, w - 3.6, h - 4.4), 2.0, 2.0)
+                p.drawLine(QPointF(1.8, 5.8), QPointF(w - 1.8, 5.8))
+                p.drawLine(QPointF(cx - 2.4, 1.4), QPointF(cx - 2.4, 3.4))
+                p.drawLine(QPointF(cx + 2.4, 1.4), QPointF(cx + 2.4, 3.4))
 
     class _MediaSeekBar(QWidget):
         """Interactive live media progress/seek bar with mm:ss elapsed & total time labels synced to Windows GSMTC."""
@@ -1844,6 +1958,13 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
             # Live 33fps Music Visualizer & Album Cover state for the Idle Dynamic Notch
             self._music_playing_active: bool = False
+            self._dash_media_grace_until: float = 0.0  # Keep Music Tab visible while Dashboard is open right after clicking Pause
+            self._media_panel_expanded: bool = False
+            self._media_panel_anim = QVariantAnimation(self)
+            self._media_panel_anim.setDuration(580)
+            self._media_panel_anim.setEasingCurve(QEasingCurve.Type.InOutQuart)
+            self._media_panel_anim.valueChanged.connect(self._on_media_panel_anim)
+            self._media_panel_anim.finished.connect(self._on_media_panel_anim_done)
             self._tucked_dodge: bool = False
             self._vis_bars: list[float] = [0.22, 0.35, 0.50, 0.38, 0.28, 0.42]
             self._vis_phase: float = 0.0
@@ -2054,11 +2175,26 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._art_pixmap = None
                 self._art_pixmap_track = ""
 
-            # Automatically morph the idle/hover/dashboard notch size when music starts or stops
+            # Automatically morph the idle/hover/dashboard notch size when music starts or stops,
+            # OR when the 20s pause grace window expires (magnetically sucking the Music Tab back into the notch!)
+            in_grace = time.time() < getattr(self, "_dash_media_grace_until", 0.0)
+            should_show_dash_music = is_playing or in_grace
+
             if is_playing != self._music_playing_active:
                 self._music_playing_active = is_playing
-                if self.state in ("idle", "hover", "dashboard"):
+                if self.state in ("idle", "hover"):
                     self._animate_to(self.state, duration_ms=460)
+                elif self.state == "dashboard":
+                    self._set_dashboard_music_expanded(should_show_dash_music)
+            elif self.state == "dashboard" and (should_show_dash_music != self._media_panel_expanded):
+                # 20-second pause grace timer just expired -> smoothly magnet-retract the Music Tab back into the notch!
+                self._set_dashboard_music_expanded(should_show_dash_music)
+
+            # Sync Play/Pause vector glyph in Dashboard
+            if hasattr(self, "_dash_play_btn"):
+                if self._dash_play_btn.is_playing != is_playing:
+                    self._dash_play_btn.is_playing = is_playing
+                    self._dash_play_btn.update()
 
             if not is_playing:
                 return
@@ -2105,9 +2241,15 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
         def _animate_to(self, new_state: str, duration_ms: int = 540) -> None:
             prev_state = self.state
             self.state = new_state
+            if new_state == "idle":
+                # Closing the notch resets the pause grace timer so next time you open it while paused, it stays compact
+                self._dash_media_grace_until = 0.0
+            show_dash_music = getattr(self, "_music_playing_active", False) or (
+                time.time() < getattr(self, "_dash_media_grace_until", 0.0)
+            )
             if new_state == "chat" and self._has_messages:
                 key = "chat_active"
-            elif new_state == "dashboard" and getattr(self, "_music_playing_active", False):
+            elif new_state == "dashboard" and show_dash_music:
                 key = "dashboard_music"
             elif new_state == "idle" and getattr(self, "_tucked_dodge", False):
                 key = "tucked"
@@ -2404,19 +2546,22 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(12)
 
-            # ================= SECTION 1: NOW PLAYING (Left — ONLY shown when audio is actively playing!) =================
+            # ================= SECTION 1: NOW PLAYING (Left — magnetically slides in/out with silky animation!) =================
             self._dash_media_container = QWidget()
             self._dash_media_container.setStyleSheet("background: transparent;")
+            self._dash_media_opacity = QGraphicsOpacityEffect(self._dash_media_container)
+            self._dash_media_opacity.setOpacity(1.0)
+            self._dash_media_container.setGraphicsEffect(self._dash_media_opacity)
             media_wrap = QHBoxLayout(self._dash_media_container)
             media_wrap.setContentsMargins(0, 0, 0, 0)
             media_wrap.setSpacing(10)
 
-            self._dash_music_icon = QLabel("🎵")
+            self._dash_music_icon = QLabel("")
             self._dash_music_icon.setFixedSize(78, 78)
             self._dash_music_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._dash_music_icon.setStyleSheet(
                 "background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.14); "
-                "border-radius: 14px; font-size: 28px;"
+                "border-radius: 14px;"
             )
             media_wrap.addWidget(self._dash_music_icon, alignment=Qt.AlignmentFlag.AlignVCenter)
 
@@ -2440,22 +2585,15 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
             ctrl_row = QHBoxLayout()
             ctrl_row.setSpacing(6)
-            for sym, act, tip in (
-                ("⏮", "prev_track", "Previous Track"),
-                ("⏯", "play_pause", "Play / Pause"),
-                ("⏭", "next_track", "Next Track"),
-            ):
-                b = QPushButton(sym)
-                b.setFixedSize(30, 26)
-                b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-                b.setToolTip(tip)
-                b.setStyleSheet(
-                    "QPushButton { background: rgba(255,255,255,0.08); color: #f8fafc; "
-                    "border: none; border-radius: 7px; font-size: 12px; }"
-                    "QPushButton:hover { background: rgba(255,255,255,0.20); }"
-                )
-                b.clicked.connect(lambda _c=False, a=act: self._on_dash_media_control(a))
-                ctrl_row.addWidget(b)
+            btn_prev = _CustomMediaButton("prev", "Previous Track")
+            btn_prev.clicked.connect(lambda: self._on_dash_media_control("prev_track"))
+            self._dash_play_btn = _CustomMediaButton("play_pause", "Play / Pause")
+            self._dash_play_btn.clicked.connect(lambda: self._on_dash_media_control("play_pause"))
+            btn_next = _CustomMediaButton("next", "Next Track")
+            btn_next.clicked.connect(lambda: self._on_dash_media_control("next_track"))
+            ctrl_row.addWidget(btn_prev)
+            ctrl_row.addWidget(self._dash_play_btn)
+            ctrl_row.addWidget(btn_next)
             ctrl_row.addStretch(1)
             m_info.addLayout(ctrl_row)
 
@@ -2468,7 +2606,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             media_wrap.addLayout(m_info)
             row.addWidget(self._dash_media_container)
 
-            # Vertical hairline divider 1 (hidden when music section is hidden!)
+            # Vertical hairline divider 1 (magnetically retracts with music section!)
             self._dash_div1 = QFrame()
             self._dash_div1.setFixedSize(1, 86)
             self._dash_div1.setStyleSheet("background: rgba(255,255,255,0.12);")
@@ -2519,12 +2657,17 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             )
             cal_col.addWidget(self._dash_clock_lbl)
 
-            self._dash_event_pill = QLabel("✨ No urgent events")
+            ev_row = QHBoxLayout()
+            ev_row.setSpacing(5)
+            ev_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            ev_row.addWidget(_CustomMiniIcon("calendar", "#93c5fd", 12))
+            self._dash_event_pill = QLabel("No urgent events today")
             self._dash_event_pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._dash_event_pill.setStyleSheet(
                 "color: #93c5fd; font-size: 10px; font-weight: 700; background: transparent;"
             )
-            cal_col.addWidget(self._dash_event_pill)
+            ev_row.addWidget(self._dash_event_pill)
+            cal_col.addLayout(ev_row)
             row.addLayout(cal_col)
 
             # Vertical hairline divider 2
@@ -2533,15 +2676,17 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             div2.setStyleSheet("background: rgba(255,255,255,0.12);")
             row.addWidget(div2, alignment=Qt.AlignmentFlag.AlignVCenter)
 
-            # ================= SECTION 3: SYSTEM MONITOR (CPU / RAM / DISK BARS + WORDS) =================
+            # ================= SECTION 3: SYSTEM MONITOR (CPU / RAM / DISK BARS + WORDS + CUSTOM VECTOR ICONS) =================
             sys_col = QVBoxLayout()
             sys_col.setSpacing(6)
             sys_col.setContentsMargins(2, 4, 2, 2)
 
             sys_hdr_row = QHBoxLayout()
-            sys_title = QLabel("🖥  System Monitor")
+            sys_hdr_row.setSpacing(5)
+            sys_hdr_row.addWidget(_CustomMiniIcon("monitor", "#93c5fd", 13))
+            sys_title = QLabel("System Monitor")
             sys_title.setStyleSheet("color: #f8fafc; font-size: 11px; font-weight: 800; background: transparent;")
-            self._dash_health_badge = QLabel("OK")
+            self._dash_health_badge = QLabel("GOOD")
             self._dash_health_badge.setStyleSheet(
                 "background: rgba(34, 197, 94, 0.22); color: #4ade80; "
                 "border-radius: 5px; padding: 1px 6px; font-size: 9px; font-weight: 800;"
@@ -2551,11 +2696,12 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             sys_hdr_row.addWidget(self._dash_health_badge)
             sys_col.addLayout(sys_hdr_row)
 
-            def _make_metric_row(icon: str, name: str, bar_color: str) -> tuple[QHBoxLayout, QFrame, QLabel]:
+            def _make_metric_row(icon_kind: str, name: str, bar_color: str) -> tuple[QHBoxLayout, QFrame, QLabel]:
                 mr = QHBoxLayout()
                 mr.setSpacing(6)
-                lbl = QLabel(f"{icon} {name}")
-                lbl.setFixedWidth(48)
+                mr.addWidget(_CustomMiniIcon(icon_kind, bar_color, 13))
+                lbl = QLabel(name)
+                lbl.setFixedWidth(32)
                 lbl.setStyleSheet("color: #cbd5e1; font-size: 10px; font-weight: 700; background: transparent;")
                 track = QFrame()
                 track.setFixedSize(76, 5)
@@ -2564,7 +2710,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 fill.setGeometry(0, 0, 24, 5)
                 fill.setStyleSheet(f"background: {bar_color}; border-radius: 2.5px;")
                 word_lbl = QLabel("Low")
-                word_lbl.setFixedWidth(48)
+                word_lbl.setFixedWidth(44)
                 word_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 word_lbl.setStyleSheet(f"color: {bar_color}; font-size: 10px; font-weight: 800; background: transparent;")
                 mr.addWidget(lbl)
@@ -2572,9 +2718,9 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 mr.addWidget(word_lbl)
                 return mr, fill, word_lbl
 
-            cpu_r, self._dash_cpu_bar, self._dash_cpu_word = _make_metric_row("⚡", "CPU", "#38bdf8")
-            ram_r, self._dash_ram_bar, self._dash_ram_word = _make_metric_row("🧠", "RAM", "#4ade80")
-            dsk_r, self._dash_disk_bar, self._dash_disk_word = _make_metric_row("💾", "DISK", "#f59e0b")
+            cpu_r, self._dash_cpu_bar, self._dash_cpu_word = _make_metric_row("cpu", "CPU", "#38bdf8")
+            ram_r, self._dash_ram_bar, self._dash_ram_word = _make_metric_row("ram", "RAM", "#4ade80")
+            dsk_r, self._dash_disk_bar, self._dash_disk_word = _make_metric_row("disk", "DISK", "#f59e0b")
             sys_col.addLayout(cpu_r)
             sys_col.addLayout(ram_r)
             sys_col.addLayout(dsk_r)
@@ -2620,8 +2766,52 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             outer.addWidget(grabber, alignment=Qt.AlignmentFlag.AlignHCenter)
             return page
 
+        def _set_dashboard_music_expanded(self, expand: bool, animate: bool = True) -> None:
+            """Silky magnetic slide-in / pull-back animation for the Music Tab inside the open Dashboard."""
+            self._media_panel_expanded = bool(expand)
+            target_w = 224 if expand else 0
+            if not animate:
+                self._dash_media_container.setMaximumWidth(target_w)
+                self._dash_media_opacity.setOpacity(1.0 if expand else 0.0)
+                self._dash_media_container.setVisible(expand)
+                self._dash_div1.setVisible(expand)
+                return
+
+            if expand:
+                self._dash_media_container.setVisible(True)
+                self._dash_div1.setVisible(True)
+
+            self._media_panel_anim.stop()
+            cur_w = self._dash_media_container.maximumWidth()
+            if cur_w > 500:
+                cur_w = 224 if self._dash_media_container.isVisible() else 0
+            self._media_panel_anim.setStartValue(float(cur_w))
+            self._media_panel_anim.setEndValue(float(target_w))
+            self._media_panel_anim.start()
+
+            # Simultaneously morph the outer notch silhouette smoothly with InOutQuart magnetic pull!
+            tw, th = self.SIZES["dashboard_music" if expand else "dashboard"]
+            self._anim.stop()
+            self._anim.setDuration(580)
+            self._anim.setEasingCurve(QEasingCurve.Type.InOutQuart)
+            self._anim.setStartValue(QSizeF(float(self._notch_w), float(self._notch_h)))
+            self._anim.setEndValue(QSizeF(float(tw), float(th)))
+            self._anim.start()
+
+        def _on_media_panel_anim(self, val: Any) -> None:
+            w = max(0, int(round(float(val))))
+            self._dash_media_container.setMaximumWidth(w)
+            self._dash_media_opacity.setOpacity(max(0.0, min(1.0, w / 224.0)))
+
+        def _on_media_panel_anim_done(self) -> None:
+            if not self._media_panel_expanded:
+                self._dash_media_container.setVisible(False)
+                self._dash_div1.setVisible(False)
+
         def _on_dash_media_control(self, action: str) -> None:
             """Send Windows hardware media key + WM_APPCOMMAND (play_pause, next_track, prev_track) from the Dashboard Now Playing card."""
+            # Keep the Music Tab visible inside the open Dashboard for 20s after clicking Pause/Skip so you can unpause right from the notch!
+            self._dash_media_grace_until = time.time() + 20.0
             def _run() -> None:
                 try:
                     from tools.pc_control import send_media_transport_command
@@ -2673,12 +2863,15 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             snap = self.service.fetch_dashboard_snapshot()
             media = snap["media"]
             is_playing_now = bool(media.get("playing"))
+            in_pause_grace = time.time() < getattr(self, "_dash_media_grace_until", 0.0)
+            show_music_panel = is_playing_now or in_pause_grace
 
-            # Show the Media Player tab ONLY when audio is actively playing; hide it completely when paused/idle to save space!
+            # Keep panel visibility synced (animate smoothly if Dashboard is already open, snap cleanly when opening fresh)
             if hasattr(self, "_dash_media_container"):
-                self._dash_media_container.setVisible(is_playing_now)
-            if hasattr(self, "_dash_div1"):
-                self._dash_div1.setVisible(is_playing_now)
+                if self.state == "dashboard" and self._media_panel_expanded != show_music_panel:
+                    self._set_dashboard_music_expanded(show_music_panel, animate=self._content_root.isVisible())
+                elif not self._content_root.isVisible():
+                    self._set_dashboard_music_expanded(show_music_panel, animate=False)
 
             if is_playing_now:
                 raw_track = str(media.get("track") or "Playing")
@@ -2745,12 +2938,12 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
             events = snap.get("events") or []
             if events:
-                ev_str = str(events[0])
-                if len(ev_str) > 34:
-                    ev_str = ev_str[:32] + "…"
+                ev_str = re.sub(r"^[📅⏰🔥📌✨\s]+", "", str(events[0])).strip()
+                if len(ev_str) > 32:
+                    ev_str = ev_str[:30] + "…"
                 self._dash_event_pill.setText(ev_str)
             else:
-                self._dash_event_pill.setText("✨ No urgent events today")
+                self._dash_event_pill.setText("No urgent events today")
 
         def _build_suggestions_page(self) -> QWidget:
             page = QWidget()
