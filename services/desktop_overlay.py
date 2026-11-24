@@ -2363,7 +2363,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             "hover_music": (248, 25),      # Hovered horizontal music strip
             "hover_music_clock": (338, 25),# Hovered wider music + Timer/Stopwatch strip
             "dashboard": (548, 142),   # Compact horizontal Dashboard when NO audio is playing (Calendar + System Monitor + Volume + Icons)
-            "dashboard_music": (790, 146), # Wide horizontal Dashboard WITH Media Player when audio is playing!
+            "dashboard_music": (798, 146), # Wide horizontal Dashboard WITH Media Player when audio is playing!
             "suggestions": (488, 516), # Connections hub card
             "chat": (556, 336),        # JARVIS Quick Chat card
             "chat_active": (556, 468), # JARVIS Quick Chat card with active conversation
@@ -3247,18 +3247,18 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             # ================= SECTION 1: NOW PLAYING (Left — magnetically slides in/out with silky animation!) =================
             self._dash_media_container = QWidget()
             self._dash_media_container.setMinimumWidth(0)
-            self._dash_media_container.setMaximumWidth(224)
+            self._dash_media_container.setMaximumWidth(232)
             self._dash_media_container.setStyleSheet("background: transparent;")
             media_wrap = QHBoxLayout(self._dash_media_container)
             media_wrap.setContentsMargins(0, 0, 0, 0)
             media_wrap.setSpacing(10)
 
             art_col = QVBoxLayout()
-            art_col.setContentsMargins(0, 2, 0, 0)
-            art_col.setSpacing(3)
+            art_col.setContentsMargins(0, 0, 0, 0)
+            art_col.setSpacing(5)
             art_col.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._dash_music_icon = _SquircleAlbumArt(74)
-            self._dash_source_badge = _MusicSourceBadge(22)
+            self._dash_music_icon = _SquircleAlbumArt(84)
+            self._dash_source_badge = _MusicSourceBadge(26)
             art_col.addWidget(self._dash_music_icon, alignment=Qt.AlignmentFlag.AlignHCenter)
             art_col.addWidget(self._dash_source_badge, alignment=Qt.AlignmentFlag.AlignHCenter)
             media_wrap.addLayout(art_col)
@@ -3467,7 +3467,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
         def _set_dashboard_music_expanded(self, expand: bool, animate: bool = True) -> None:
             """Silky magnetic slide-in / pull-back animation for the Music Tab inside the open Dashboard."""
             self._media_panel_expanded = bool(expand)
-            target_w = 224 if expand else 0
+            target_w = 232 if expand else 0
             if not animate:
                 self._dash_media_container.setMaximumWidth(target_w)
                 self._dash_media_container.setVisible(expand)
@@ -3481,7 +3481,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._media_panel_anim.stop()
             cur_w = self._dash_media_container.maximumWidth()
             if cur_w > 500:
-                cur_w = 224 if self._dash_media_container.isVisible() else 0
+                cur_w = 232 if self._dash_media_container.isVisible() else 0
             # Silky spring pop when sliding out, magnetic anticipation + cushioned settle when pulling back in
             if expand:
                 m_curve = QEasingCurve(QEasingCurve.Type.OutBack)
