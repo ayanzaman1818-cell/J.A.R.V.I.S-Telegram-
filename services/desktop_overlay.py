@@ -2663,7 +2663,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._content_root.setGeometry(left, 8, inner_w, inner_h)
             if hasattr(self, "_privacy_badge_overlay"):
                 r_edge = int(round((CANVAS_W + self._notch_w) / 2.0))
-                self._privacy_badge_overlay.move(r_edge - 34, 4)
+                dot_y = 6 if self._notch_h > 40 else max(2, int(round((self._notch_h - 14.0) / 2.0)))
+                self._privacy_badge_overlay.move(r_edge - 30, dot_y)
                 self._privacy_badge_overlay.raise_()
             self.update()
 
@@ -2845,7 +2846,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             if priv_changed:
                 if hasattr(self, "_privacy_badge_overlay"):
                     r_edge = int(round((CANVAS_W + self._notch_w) / 2.0))
-                    self._privacy_badge_overlay.move(r_edge - 34, 4)
+                    dot_y = 6 if self._notch_h > 40 else max(2, int(round((self._notch_h - 14.0) / 2.0)))
+                    self._privacy_badge_overlay.move(r_edge - 30, dot_y)
                     self._privacy_badge_overlay.set_state(new_mic, new_cam)
                     self._privacy_badge_overlay.raise_()
                 self.update()
@@ -3462,34 +3464,16 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
                 p.restore()
             elif self.state == "idle" and (getattr(self, "_priv_mic", False) or getattr(self, "_priv_cam", False)) and nh >= 12:
-                # Standalone Glowing Mic (orange) / Camera (green) Privacy Indicator Pill with crisp labels
-                p.save()
-                p.setClipPath(path)
-                _EXTRAS["draw_privacy_dots"](p, cx, nh / 2.0, bool(self._priv_mic), bool(self._priv_cam), with_labels=True)
-                p.restore()
+                # Standalone idle privacy pill — _PrivacyDotOverlay draws the single clean dot (no text)
+                pass
             elif self.state == "hover":
-                # Glowing emerald status dot + crisp 'JARVIS' micro-label ONLY when actively hovering the notch
+                # Crisp 'JARVIS' micro-label when actively hovering the notch (no decorative side dots)
                 if nh >= 15:
-                    p.setPen(Qt.PenStyle.NoPen)
-                    p.setBrush(QColor("#34d399"))
-                    p.drawEllipse(QPointF(left + 14.0, nh / 2.0), 2.8, 2.8)
                     p.setPen(QColor(226, 232, 240, 210))
                     font = QFont("SF Pro Display", 8, QFont.Weight.Bold)
                     font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.8)
                     p.setFont(font)
                     p.drawText(QRectF(left, 0, nw, nh), Qt.AlignmentFlag.AlignCenter, "JARVIS")
-                    p.setPen(Qt.PenStyle.NoPen)
-                    p.setBrush(QColor("#38bdf8"))
-                    p.drawEllipse(QPointF(right - 14.0, nh / 2.0), 2.4, 2.4)
-
-            # Always overlay glowing iOS/macOS orange (mic) / green (camera) privacy dots when active on ANY expanded/music/clock notch
-            if (getattr(self, "_priv_mic", False) or getattr(self, "_priv_cam", False)) and nh >= 14 and self._last_idle_key != "idle_privacy":
-                p.save()
-                p.setClipPath(path)
-                dot_x = right - 12.0 if nh > 60 else (cx)
-                dot_y = 10.0 if nh > 60 else 4.2
-                _EXTRAS["draw_privacy_dots"](p, dot_x, dot_y, bool(self._priv_mic), bool(self._priv_cam))
-                p.restore()
 
         # --- UI Pages Construction (Suggestions, Quick Chat, Voice Orb) ---
 

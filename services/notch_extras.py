@@ -186,8 +186,14 @@ def _is_frameserver_webcam_active() -> bool:
         return False
     try:
         adv = ctypes.windll.advapi32
+        adv.OpenSCManagerW.argtypes = [wt.LPCWSTR, wt.LPCWSTR, wt.DWORD]
         adv.OpenSCManagerW.restype = wt.HANDLE
+        adv.OpenServiceW.argtypes = [wt.HANDLE, wt.LPCWSTR, wt.DWORD]
         adv.OpenServiceW.restype = wt.HANDLE
+        adv.QueryServiceStatus.argtypes = [wt.HANDLE, ctypes.POINTER(_SERVICE_STATUS)]
+        adv.QueryServiceStatus.restype = wt.BOOL
+        adv.CloseServiceHandle.argtypes = [wt.HANDLE]
+        adv.CloseServiceHandle.restype = wt.BOOL
         scm = adv.OpenSCManagerW(None, None, 0x0001)  # SC_MANAGER_CONNECT
         if not scm:
             return False
