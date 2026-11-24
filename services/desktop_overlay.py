@@ -2475,11 +2475,12 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 # Repaint at full 60fps so the Timer/Stopwatch hands & countdown arc rotate silky smooth!
                 self.update()
 
-            # Sync Play/Pause vector glyph in Dashboard
+            # Sync Play/Pause vector glyph in Dashboard (respecting instant 0ms optimistic click override)
             if hasattr(self, "_dash_play_btn"):
-                if self._dash_play_btn.is_playing != is_playing:
-                    self._dash_play_btn.is_playing = is_playing
-                    self._dash_play_btn.update()
+                if time.time() >= getattr(self, "_play_btn_optimistic_until", 0.0):
+                    if self._dash_play_btn.is_playing != is_playing:
+                        self._dash_play_btn.is_playing = is_playing
+                        self._dash_play_btn.update()
 
             if not is_playing:
                 self._idle_song_title = ""
@@ -3265,16 +3266,33 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             """Send Windows hardware media key + WM_APPCOMMAND (play_pause, next_track, prev_track) from the Dashboard Now Playing card."""
             # Keep the Music Tab visible inside the open Dashboard for 20s after clicking Pause/Skip so you can unpause right from the notch!
             self._dash_media_grace_until = time.time() + 20.0
+            # Instant 0ms icon flip + progress bar freeze/resume when clicking Play/Pause!
+            if action == "play_pause" and hasattr(self, "_dash_play_btn"):
+                new_playing = not bool(self._dash_play_btn.is_playing)
+                self._dash_play_btn.is_playing = new_playing
+                self._dash_play_btn.update()
+                self._play_btn_optimistic_until = time.time() + 1.8
+                with self.service._media_timeline._lock:
+                    if not new_playing and self.service._media_timeline._playing:
+                        el = max(0.0, time.time() - self.service._media_timeline._updated_ts)
+                        self.service._media_timeline._pos = min(
+                            self.service._media_timeline._duration,
+                            self.service._media_timeline._pos + el,
+                        )
+                    self.service._media_timeline._updated_ts = time.time()
+                    self.service._media_timeline._playing = new_playing
+
             def _run() -> None:
                 try:
                     from tools.pc_control import send_media_transport_command
                     send_media_transport_command(action)
-                    time.sleep(0.35)
+                    time.sleep(0.25)
                 except Exception:
                     pass
+                self.service._now_playing_ts = 0.0
                 self.service._media_timeline.trigger_poll_async(force=True)
             threading.Thread(target=_run, daemon=True).start()
-            QTimer.singleShot(420, self._refresh_dashboard)
+            QTimer.singleShot(300, self._refresh_dashboard)
 
         def _sync_dash_track_labels(self, raw_track: str, source: str = "Playing") -> None:
             """Instantly update the Dashboard song title, artist, and squircle cover art without waiting for a click."""
