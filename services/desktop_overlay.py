@@ -402,12 +402,6 @@ class DesktopOverlayService:
         self._now_playing_ts: float = 0.0
         self._album_art_cache: dict[str, dict[str, Any]] = {}
         self._album_fetching_track: str = ""
-        self._art_http_client: Any = None
-        self._art_cache_dir = config.BASE_DIR / ".cache" / "album_art"
-        try:
-            self._art_cache_dir.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
         self._current_art_bytes: bytes = b""
         self._current_art_track: str = ""
         self._current_art_palette: list[tuple[int, int, int]] = [
@@ -594,7 +588,8 @@ class DesktopOverlayService:
             return {"playing": False, "track": "No song playing right now", "source": "Media Idle"}
 
         spotify_titles: list[str] = []
-        browser_media_titles: list[str] = []
+        apple_titles: list[str] = []
+        browser_media_items: list[tuple[str, str, str]] = []
         user32 = ctypes.windll.user32
         EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
         cls_buf = ctypes.create_unicode_buffer(128)
@@ -608,14 +603,29 @@ class DesktopOverlayService:
                 return True
             user32.GetClassNameW(hwnd, cls_buf, 128)
             cname = cls_buf.value
-            if not cname.startswith("Chrome_WidgetWin"):
-                return True
             buf = ctypes.create_unicode_buffer(length + 1)
             user32.GetWindowTextW(hwnd, buf, length + 1)
             title = buf.value.strip()
             if not title:
                 return True
             t_low = title.lower()
+
+            # Apple Music (WinUI / UWP) or iTunes (Win32)
+            if cname in ("iTunes", "ApplicationFrameWindow", "WinUIDesktopWin32WindowClass") and (
+                "apple music" in t_low or "itunes" in t_low
+            ):
+                if " - " in title:
+                    cleaned_am = (
+                        title.replace(" - Apple Music", "")
+                        .replace(" - iTunes", "")
+                        .strip()
+                    )
+                    if cleaned_am:
+                        apple_titles.append(cleaned_am)
+                return True
+
+            if not cname.startswith("Chrome_WidgetWin"):
+                return True
             if t_low in ("spotify", "spotify free", "spotify premium"):
                 spotify_titles.append("PAUSED")
             elif " - " in title:
@@ -636,16 +646,29 @@ class DesktopOverlayService:
                 ):
                     spotify_titles.insert(0, title)
                 elif user32.IsWindowVisible(hwnd) and (
-                    "youtube music" in t_low or " - youtube" in t_low or "soundcloud" in t_low
+                    "youtube music" in t_low
+                    or " - youtube" in t_low
+                    or "soundcloud" in t_low
+                    or "apple music" in t_low
                 ):
+                    if "apple music" in t_low:
+                        app_id, app_lbl = "apple_music", "Apple Music · Playing Now"
+                    elif "youtube music" in t_low:
+                        app_id, app_lbl = "youtube_music", "YouTube Music · Playing Now"
+                    elif "soundcloud" in t_low:
+                        app_id, app_lbl = "soundcloud", "SoundCloud · Playing Now"
+                    else:
+                        app_id, app_lbl = "youtube", "YouTube · Playing Now"
                     cleaned = (
                         title.replace(" - YouTube Music", "")
                         .replace(" - YouTube", "")
+                        .replace(" - Apple Music", "")
+                        .replace(" - SoundCloud", "")
                         .replace(" - Google Chrome", "")
                         .replace(" - Microsoft Edge", "")
                         .strip()
                     )
-                    browser_media_titles.append(cleaned)
+                    browser_media_items.append((cleaned, app_id, app_lbl))
             return True
 
         try:
@@ -655,23 +678,30 @@ class DesktopOverlayService:
 
         for st in spotify_titles:
             if st != "PAUSED":
-                res = {"playing": True, "track": st, "source": "Spotify · Playing Now"}
+                res = {"playing": True, "track": st, "source": "Spotify · Playing Now", "source_app": "spotify"}
                 self._now_playing_state = res
                 self._now_playing_ts = time.time()
                 self._ensure_album_art_async(st)
                 return res
-        if browser_media_titles:
-            res = {"playing": True, "track": browser_media_titles[0], "source": "Web Media · Playing Now"}
+        if apple_titles:
+            res = {"playing": True, "track": apple_titles[0], "source": "Apple Music · Playing Now", "source_app": "apple_music"}
             self._now_playing_state = res
             self._now_playing_ts = time.time()
-            self._ensure_album_art_async(browser_media_titles[0])
+            self._ensure_album_art_async(apple_titles[0])
+            return res
+        if browser_media_items:
+            b_track, b_app, b_lbl = browser_media_items[0]
+            res = {"playing": True, "track": b_track, "source": b_lbl, "source_app": b_app}
+            self._now_playing_state = res
+            self._now_playing_ts = time.time()
+            self._ensure_album_art_async(b_track)
             return res
         if "PAUSED" in spotify_titles:
-            res = {"playing": False, "track": "Spotify is open (Paused)", "source": "Spotify · Paused"}
+            res = {"playing": False, "track": "Spotify is open (Paused)", "source": "Spotify · Paused", "source_app": "spotify"}
             self._now_playing_state = res
             self._now_playing_ts = time.time()
             return res
-        res = {"playing": False, "track": "No song playing right now", "source": "Spotify / Media Idle"}
+        res = {"playing": False, "track": "No song playing right now", "source": "Spotify / Media Idle", "source_app": "generic"}
         self._now_playing_state = res
         self._now_playing_ts = time.time()
         return res
@@ -713,28 +743,18 @@ class DesktopOverlayService:
             (52, 211, 153),
         ]
         try:
-            import hashlib
             q = re.sub(r"\([^)]*\)|\[[^\]]*\]", "", track_title).replace(" - ", " ").strip()
-            cache_key = hashlib.md5(q.lower().encode("utf-8", errors="ignore")).hexdigest()
-            disk_path = getattr(self, "_art_cache_dir", config.BASE_DIR / ".cache" / "album_art") / f"{cache_key}.jpg"
-
-            # 0ms Instant Local Disk Cache hit!
-            if disk_path.exists() and disk_path.stat().st_size > 500:
-                art_bytes = disk_path.read_bytes()
-
-            if not art_bytes:
-                if self._art_http_client is None:
-                    self._art_http_client = httpx.Client(timeout=3.5, http2=False)
-                client = self._art_http_client
-                # Primary: Deezer Search API with keep-alive TCP/TLS + crisp 250x250 cover_medium (~80ms download!)
+            with httpx.Client(timeout=5.0) as client:
+                # Primary: Deezer Search API (instant, high-res 500x500 / 1000x1000 cover art)
                 r_dz = client.get(f"https://api.deezer.com/search?q={quote(q)}&limit=1")
                 if r_dz.status_code == 200:
                     dz_data = (r_dz.json() or {}).get("data") or []
                     if dz_data:
                         album_obj = dz_data[0].get("album") or {}
                         art_url = str(
-                            album_obj.get("cover_medium")
-                            or album_obj.get("cover_big")
+                            album_obj.get("cover_big")
+                            or album_obj.get("cover_xl")
+                            or album_obj.get("cover_medium")
                             or album_obj.get("cover")
                             or ""
                         )
@@ -743,7 +763,7 @@ class DesktopOverlayService:
                             if art_res.status_code == 200:
                                 art_bytes = art_res.content
 
-                # Fallback: iTunes Search API (300x300 — fast & razor-sharp for 78x78 / 18x18 squircles)
+                # Fallback: iTunes Search API (upgraded from 100x100 to crisp 600x600)
                 if not art_bytes:
                     r_it = client.get(f"https://itunes.apple.com/search?term={quote(q)}&media=music&limit=1")
                     if r_it.status_code == 200:
@@ -751,16 +771,10 @@ class DesktopOverlayService:
                         if results:
                             art_url = str(results[0].get("artworkUrl100") or "")
                             if art_url:
-                                art_url = art_url.replace("100x100bb", "300x300bb")
+                                art_url = art_url.replace("100x100bb", "600x600bb")
                                 art_res = client.get(art_url)
                                 if art_res.status_code == 200:
                                     art_bytes = art_res.content
-
-                if art_bytes:
-                    try:
-                        disk_path.write_bytes(art_bytes)
-                    except Exception:
-                        pass
         except Exception:
             pass
 
@@ -2055,6 +2069,127 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawPath(squircle)
 
+    class _MusicSourceBadge(QWidget):
+        """Hand-drawn custom vector music player icon badge (Spotify, Apple Music, YouTube Music, YouTube, SoundCloud)."""
+
+        _TOOLTIPS = {
+            "spotify": "Playing from Spotify",
+            "apple_music": "Playing from Apple Music / iTunes",
+            "youtube_music": "Playing from YouTube Music",
+            "youtube": "Playing from YouTube",
+            "soundcloud": "Playing from SoundCloud",
+            "generic": "Playing Media",
+        }
+
+        def __init__(self, size: int = 18, parent: Optional[QWidget] = None) -> None:
+            super().__init__(parent)
+            self._source = "spotify"
+            self.setFixedSize(size, size)
+            self.setToolTip(self._TOOLTIPS["spotify"])
+
+        def set_source(self, source_app: str) -> None:
+            src = (source_app or "generic").strip().lower()
+            if src not in self._TOOLTIPS:
+                src = "generic"
+            if src != self._source:
+                self._source = src
+                self.setToolTip(self._TOOLTIPS[src])
+                self.update()
+
+        def paintEvent(self, _event: Any) -> None:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            w, h = float(self.width()), float(self.height())
+            cx, cy = w / 2.0, h / 2.0
+            r = min(w, h) / 2.0 - 0.8
+
+            if self._source == "spotify":
+                # Authentic Spotify green circle + 3 curved dark sound-wave arcs
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor("#1DB954"))
+                p.drawEllipse(QPointF(cx, cy), r, r)
+                for y_off, half_w, curve_h, stroke in (
+                    (-2.3, 4.4, -1.6, 1.45),
+                    (0.1, 3.7, -1.3, 1.25),
+                    (2.3, 2.9, -1.0, 1.10),
+                ):
+                    arc = QPainterPath()
+                    arc.moveTo(cx - half_w, cy + y_off + 0.5)
+                    arc.quadTo(cx, cy + y_off + curve_h, cx + half_w, cy + y_off + 0.8)
+                    p.setPen(QPen(QColor("#07080b"), stroke, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.drawPath(arc)
+
+            elif self._source == "apple_music":
+                # Authentic Apple Music coral-red squircle + crisp white beamed double music note
+                sq = _make_squircle_path(QRectF(0.8, 0.8, w - 1.6, h - 1.6))
+                g = QLinearGradient(0.0, 0.0, 0.0, h)
+                g.setColorAt(0.0, QColor("#FA233B"))
+                g.setColorAt(1.0, QColor("#FB5C74"))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QBrush(g))
+                p.drawPath(sq)
+                # Crisp white double note
+                p.setPen(QPen(QColor("#ffffff"), 1.35, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                p.drawLine(QPointF(cx - 2.0, cy + 3.2), QPointF(cx - 2.0, cy - 3.0))
+                p.drawLine(QPointF(cx + 3.2, cy + 2.2), QPointF(cx + 3.2, cy - 4.0))
+                p.drawLine(QPointF(cx - 2.0, cy - 3.0), QPointF(cx + 3.2, cy - 4.0))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor("#ffffff"))
+                p.drawEllipse(QPointF(cx - 3.3, cy + 3.3), 1.75, 1.35)
+                p.drawEllipse(QPointF(cx + 1.9, cy + 2.3), 1.75, 1.35)
+
+            elif self._source == "youtube_music":
+                # Authentic YouTube Music red circle + crisp white ring + play triangle
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor("#FF0000"))
+                p.drawEllipse(QPointF(cx, cy), r, r)
+                p.setPen(QPen(QColor("#ffffff"), 1.0))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawEllipse(QPointF(cx, cy), r * 0.62, r * 0.62)
+                tri = QPainterPath()
+                tri.moveTo(cx - 1.6, cy - 2.5)
+                tri.lineTo(cx + 2.8, cy)
+                tri.lineTo(cx - 1.6, cy + 2.5)
+                tri.closeSubpath()
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor("#ffffff"))
+                p.drawPath(tri)
+
+            elif self._source == "youtube":
+                # Authentic YouTube red rounded pill + white play triangle
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor("#FF0000"))
+                p.drawRoundedRect(QRectF(0.6, 2.4, w - 1.2, h - 4.8), 4.0, 4.0)
+                tri = QPainterPath()
+                tri.moveTo(cx - 1.9, cy - 2.6)
+                tri.lineTo(cx + 2.8, cy)
+                tri.lineTo(cx - 1.9, cy + 2.6)
+                tri.closeSubpath()
+                p.setBrush(QColor("#ffffff"))
+                p.drawPath(tri)
+
+            elif self._source == "soundcloud":
+                # Authentic SoundCloud orange rounded badge + white audio bars
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor("#FF5500"))
+                p.drawRoundedRect(QRectF(0.8, 0.8, w - 1.6, h - 1.6), 4.5, 4.5)
+                p.setPen(QPen(QColor("#ffffff"), 1.35, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                for dx, bh in ((-3.8, 2.5), (-1.4, 4.5), (1.0, 5.2), (3.4, 3.6)):
+                    p.drawLine(QPointF(cx + dx, cy + 3.0), QPointF(cx + dx, cy + 3.0 - bh))
+
+            else:
+                # Generic clean dark glass circle + white music note
+                p.setPen(QPen(QColor(255, 255, 255, 50), 0.9))
+                p.setBrush(QColor(255, 255, 255, 22))
+                p.drawEllipse(QPointF(cx, cy), r, r)
+                p.setPen(QPen(QColor("#e2e8f0"), 1.3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(cx + 0.8, cy + 2.6), QPointF(cx + 0.8, cy - 3.2))
+                p.drawLine(QPointF(cx + 0.8, cy - 3.2), QPointF(cx + 3.4, cy - 2.2))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor("#e2e8f0"))
+                p.drawEllipse(QPointF(cx - 0.8, cy + 2.8), 1.8, 1.4)
+
     def _draw_timer_icon(
         p: QPainter,
         cx: float,
@@ -2522,7 +2657,11 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 # Song changed -> immediately reset & re-sync GSMTC timeline AND update Dashboard labels automatically!
                 self.service._media_timeline.notify_track_changed()
                 if hasattr(self, "_dash_media_track"):
-                    self._sync_dash_track_labels(raw_t, str(media.get("source") or "Playing"))
+                    self._sync_dash_track_labels(
+                        raw_t,
+                        str(media.get("source") or "Playing"),
+                        str(media.get("source_app") or ""),
+                    )
             else:
                 self._idle_marquee_t = getattr(self, "_idle_marquee_t", 0.0) + (1.0 / 60.0)
                 # Keep GSMTC timeline continuously synced in the background regardless of notch state
@@ -3027,8 +3166,15 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             media_wrap.setContentsMargins(0, 0, 0, 0)
             media_wrap.setSpacing(10)
 
+            art_col = QVBoxLayout()
+            art_col.setContentsMargins(0, 2, 0, 0)
+            art_col.setSpacing(4)
+            art_col.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._dash_music_icon = _SquircleAlbumArt(78)
-            media_wrap.addWidget(self._dash_music_icon, alignment=Qt.AlignmentFlag.AlignVCenter)
+            self._dash_source_badge = _MusicSourceBadge(18)
+            art_col.addWidget(self._dash_music_icon, alignment=Qt.AlignmentFlag.AlignHCenter)
+            art_col.addWidget(self._dash_source_badge, alignment=Qt.AlignmentFlag.AlignHCenter)
+            media_wrap.addLayout(art_col)
 
             m_info = QVBoxLayout()
             m_info.setSpacing(2)
@@ -3295,13 +3441,12 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._dash_play_btn.update()
                 self._play_btn_optimistic_until = time.time() + 1.8
                 with self.service._media_timeline._lock:
-                    if not new_playing and self.service._media_timeline._playing and self.service._media_timeline._perf_anchor > 0:
-                        el = max(0.0, (time.perf_counter() - self.service._media_timeline._perf_anchor) * self.service._media_timeline._rate)
+                    if not new_playing and self.service._media_timeline._playing:
+                        el = max(0.0, time.time() - self.service._media_timeline._updated_ts)
                         self.service._media_timeline._pos = min(
                             self.service._media_timeline._duration,
                             self.service._media_timeline._pos + el,
                         )
-                    self.service._media_timeline._perf_anchor = time.perf_counter()
                     self.service._media_timeline._updated_ts = time.time()
                     self.service._media_timeline._playing = new_playing
 
@@ -3317,8 +3462,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             threading.Thread(target=_run, daemon=True).start()
             QTimer.singleShot(300, self._refresh_dashboard)
 
-        def _sync_dash_track_labels(self, raw_track: str, source: str = "Playing") -> None:
-            """Instantly update the Dashboard song title, artist, and squircle cover art without waiting for a click."""
+        def _sync_dash_track_labels(self, raw_track: str, source: str = "Playing", source_app: str = "") -> None:
+            """Instantly update the Dashboard song title, artist, squircle cover art, and player icon badge."""
             if " - " in raw_track:
                 artist_part, song_part = (p.strip() for p in raw_track.split(" - ", 1))
             else:
@@ -3339,6 +3484,23 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._dash_media_artist.setText(elided_artist)
             self._dash_media_artist.setToolTip(artist_part)
             self._dash_music_icon.set_pixmap(self._art_pixmap)
+            if hasattr(self, "_dash_source_badge"):
+                app_id = source_app
+                if not app_id:
+                    s_low = (source or "").lower()
+                    if "apple" in s_low or "itunes" in s_low:
+                        app_id = "apple_music"
+                    elif "youtube music" in s_low:
+                        app_id = "youtube_music"
+                    elif "youtube" in s_low:
+                        app_id = "youtube"
+                    elif "soundcloud" in s_low:
+                        app_id = "soundcloud"
+                    elif "spotify" in s_low:
+                        app_id = "spotify"
+                    else:
+                        app_id = "generic"
+                self._dash_source_badge.set_source(app_id)
 
         def _refresh_dashboard(self, opening_fresh: bool = False) -> None:
             """Update the wide DockBar-style Horizontal Dashboard with live Media, 7-Day Calendar, Clock, Events & System Monitor."""
@@ -3393,6 +3555,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._sync_dash_track_labels(
                     str(media.get("track") or "Playing"),
                     str(media.get("source") or "Playing"),
+                    str(media.get("source_app") or ""),
                 )
 
             # System Monitor: progress bars + Words (Low / Normal / High)
