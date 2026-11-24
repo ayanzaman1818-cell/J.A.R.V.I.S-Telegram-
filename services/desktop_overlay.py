@@ -2558,18 +2558,27 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             is_expanding = new_state in ("dashboard", "suggestions", "chat", "voice")
             was_expanded = prev_state in ("dashboard", "suggestions", "chat", "voice")
 
-            self._fade_anim.stop()
             if not is_expanding:
-                if was_expanded and self._content_root.isVisible():
-                    cur_op = float(self._opacity_effect.opacity())
-                    self._fade_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-                    self._fade_anim.setDuration(240)
-                    self._fade_anim.setStartValue(cur_op)
-                    self._fade_anim.setEndValue(0.0)
-                    self._fade_anim.start()
+                if self._content_root.isVisible():
+                    already_fading_out = (
+                        self._fade_anim.state() == QVariantAnimation.State.Running
+                        and float(self._fade_anim.endValue() or 1.0) <= 0.01
+                    )
+                    if not already_fading_out:
+                        self._fade_anim.stop()
+                        cur_op = float(self._opacity_effect.opacity())
+                        if cur_op > 0.02:
+                            self._fade_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+                            self._fade_anim.setDuration(340)
+                            self._fade_anim.setStartValue(cur_op)
+                            self._fade_anim.setEndValue(0.0)
+                            self._fade_anim.start()
+                        else:
+                            self._content_root.hide()
                 else:
-                    self._content_root.hide()
+                    self._fade_anim.stop()
             else:
+                self._fade_anim.stop()
                 # Set _content_root geometry AND initial opacity=0.0 BEFORE showing so there is ZERO 1-frame flash!
                 start_op = 0.20 if was_expanded else 0.0
                 self._opacity_effect.setOpacity(start_op)
