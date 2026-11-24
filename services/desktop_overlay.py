@@ -383,8 +383,10 @@ class DesktopOverlayService:
         self._cal_events_ts: float = 0.0
         self._cal_fetching: bool = False
 
-        # Live Now Playing album art, blurry background palette & WASAPI audio meter for Idle Notch Visualizer
+        # Live Now Playing album art, blurry background palette, WASAPI audio meter & GSMTC live timeline tracker
         self._audio_meter = _WindowsAudioPeakMeter()
+        from services.media_timeline import MediaTimelineTracker
+        self._media_timeline = MediaTimelineTracker()
         self._now_playing_state: dict[str, Any] = {
             "playing": False,
             "track": "No song playing right now",
@@ -1669,6 +1671,112 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             p.setFont(QFont("Segoe UI Emoji", 8))
             p.drawText(QRectF(0, h - 16, w, 16), Qt.AlignmentFlag.AlignCenter, "🔇" if self._muted else "🔊")
 
+    class _MediaSeekBar(QWidget):
+        """Interactive live media progress/seek bar with mm:ss elapsed & total time labels synced to Windows GSMTC."""
+
+        def __init__(self, tracker: Any, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self._tracker = tracker
+            self.setFixedSize(132, 22)
+            self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            self.setToolTip("Click or drag to seek song position")
+            self._dragging: bool = False
+            self._drag_ratio: float = 0.0
+            self._hovered: bool = False
+
+        @staticmethod
+        def _fmt_mmss(sec: float) -> str:
+            s = max(0, int(sec))
+            m, rem = divmod(s, 60)
+            return f"{m}:{rem:02d}"
+
+        def enterEvent(self, event: Any) -> None:
+            self._hovered = True
+            self.update()
+            super().enterEvent(event)
+
+        def leaveEvent(self, event: Any) -> None:
+            self._hovered = False
+            self.update()
+            super().leaveEvent(event)
+
+        def _ratio_from_x(self, x: float) -> float:
+            pad = 2.0
+            return max(0.0, min(1.0, (x - pad) / max(1.0, float(self.width()) - pad * 2.0)))
+
+        def mousePressEvent(self, event: Any) -> None:
+            if event.button() == Qt.MouseButton.LeftButton:
+                _pos, dur, _playing = self._tracker.current_position()
+                if dur > 0:
+                    self._dragging = True
+                    self._drag_ratio = self._ratio_from_x(float(event.position().x()))
+                    self.update()
+                    return
+            super().mousePressEvent(event)
+
+        def mouseMoveEvent(self, event: Any) -> None:
+            if self._dragging:
+                self._drag_ratio = self._ratio_from_x(float(event.position().x()))
+                self.update()
+                return
+            super().mouseMoveEvent(event)
+
+        def mouseReleaseEvent(self, event: Any) -> None:
+            if self._dragging:
+                self._dragging = False
+                _pos, dur, _playing = self._tracker.current_position()
+                if dur > 0:
+                    self._tracker.seek_async(self._drag_ratio * dur)
+                self.update()
+                return
+            super().mouseReleaseEvent(event)
+
+        def paintEvent(self, _event: Any) -> None:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            w, h = float(self.width()), float(self.height())
+            pos, dur, _playing = self._tracker.current_position()
+
+            if self._dragging and dur > 0:
+                ratio = self._drag_ratio
+                shown_pos = ratio * dur
+            elif dur > 0:
+                ratio = max(0.0, min(1.0, pos / dur))
+                shown_pos = pos
+            else:
+                ratio = 0.0
+                shown_pos = 0.0
+
+            # Elapsed / Total mm:ss timestamps on top (just like the reference image!)
+            p.setPen(QColor("#94a3b8"))
+            tf = QFont("SF Pro Display", 7, QFont.Weight.DemiBold)
+            p.setFont(tf)
+            left_txt = self._fmt_mmss(shown_pos) if dur > 0 else "0:00"
+            right_txt = self._fmt_mmss(dur) if dur > 0 else "0:00"
+            p.drawText(QRectF(0, 0, w / 2.0, 11), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, left_txt)
+            p.drawText(QRectF(w / 2.0, 0, w / 2.0, 11), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, right_txt)
+
+            # Sleek interactive seek bar track
+            bar_h = 4.5 if (self._hovered or self._dragging) else 3.2
+            bar_y = h - bar_h - 3.0
+            pad = 2.0
+            track_w = w - pad * 2.0
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(255, 255, 255, 36))
+            p.drawRoundedRect(QRectF(pad, bar_y, track_w, bar_h), bar_h / 2.0, bar_h / 2.0)
+
+            fill_w = max(0.0, track_w * ratio)
+            if fill_w > 0.5:
+                p.setBrush(QColor("#ffffff") if (self._hovered or self._dragging) else QColor("#e2e8f0"))
+                p.drawRoundedRect(QRectF(pad, bar_y, fill_w, bar_h), bar_h / 2.0, bar_h / 2.0)
+
+            # Circular scrub thumb when hovering or dragging
+            if (self._hovered or self._dragging) and dur > 0:
+                thumb_x = pad + fill_w
+                thumb_y = bar_y + bar_h / 2.0
+                p.setBrush(QColor("#ffffff"))
+                p.drawEllipse(QPointF(thumb_x, thumb_y), 4.2, 4.2)
+
     class _DynamicNotchWindow(QWidget):
         """Fixed-canvas top-center Dynamic Island Notch window. Never shifts `x`; morphs symmetrically from center."""
 
@@ -1985,6 +2093,10 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
             if self.state in ("idle", "hover"):
                 self.update()
+            elif self.state == "dashboard" and hasattr(self, "_dash_seek_bar"):
+                # Smoothly advance the live progress bar & timestamps at 30fps while Dashboard is open
+                self.service._media_timeline.trigger_poll_async(force=False)
+                self._dash_seek_bar.update()
 
         def _animate_to(self, new_state: str, duration_ms: int = 540) -> None:
             prev_state = self.state
@@ -2338,12 +2450,10 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             ctrl_row.addStretch(1)
             m_info.addLayout(ctrl_row)
 
-            # Subtle sleek progress accent bar underneath controls (stays cleanly left of the divider!)
-            prog_track = QFrame()
-            prog_track.setFixedSize(124, 3)
-            prog_track.setStyleSheet("background: rgba(255,255,255,0.14); border-radius: 1.5px;")
-            m_info.addSpacing(4)
-            m_info.addWidget(prog_track)
+            # Interactive live GSMTC progress/seek bar with elapsed & total mm:ss timestamps
+            self._dash_seek_bar = _MediaSeekBar(self.service._media_timeline)
+            m_info.addSpacing(3)
+            m_info.addWidget(self._dash_seek_bar)
             m_info.addStretch(1)
 
             media_wrap.addLayout(m_info)
@@ -2510,6 +2620,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     time.sleep(0.35)
                 except Exception:
                     pass
+                self.service._media_timeline.trigger_poll_async(force=True)
             threading.Thread(target=_run, daemon=True).start()
             QTimer.singleShot(420, self._refresh_dashboard)
 
@@ -2525,6 +2636,9 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._dash_clock_lbl.setText(f"{h12}:{now.minute:02d} {ampm}")
             if hasattr(self, "_vol_slider"):
                 self._vol_slider.sync_from_os()
+            self.service._media_timeline.trigger_poll_async(force=True)
+            if hasattr(self, "_dash_seek_bar"):
+                self._dash_seek_bar.update()
 
             # Populate 7-day week strip (Mon..Sun of current week) with today highlighted in bright blue & weekends in red
             monday = now - _td(days=now.weekday())
