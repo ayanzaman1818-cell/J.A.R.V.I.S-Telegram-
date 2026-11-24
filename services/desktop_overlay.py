@@ -1191,8 +1191,10 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self.setToolTip(tooltip)
             self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             self._hover_anim = QVariantAnimation(self)
-            self._hover_anim.setDuration(240)
-            self._hover_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            self._hover_anim.setDuration(260)
+            _hc = QEasingCurve(QEasingCurve.Type.OutBack)
+            _hc.setOvershoot(1.35)
+            self._hover_anim.setEasingCurve(_hc)
             self._hover_anim.valueChanged.connect(self._on_hover_val)
 
         def _on_hover_val(self, val: Any) -> None:
@@ -1221,9 +1223,10 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             w, h = float(self.width()), float(self.height())
             cx, cy = w / 2.0, h / 2.0
             t = self._hover_t
+            tc = max(0.0, min(1.0, t))
 
-            # Smooth sub-pixel scale spring on hover
-            scale = 1.0 + 0.07 * t
+            # Smooth sub-pixel spring scale bounce on hover
+            scale = 1.0 + 0.08 * t
             p.save()
             p.translate(cx, cy)
             p.scale(scale, scale)
@@ -1233,7 +1236,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
             if self.pill_white:
                 bg_grad = QLinearGradient(0, 0, 0, h)
-                if t > 0.1:
+                if tc > 0.1:
                     bg_grad.setColorAt(0.0, QColor("#ffffff"))
                     bg_grad.setColorAt(1.0, QColor("#dbeafe"))
                 else:
@@ -1245,19 +1248,19 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 fg = QColor("#09090b")
             elif self.active_state:
                 bg_grad = QLinearGradient(0, 0, w, h)
-                bg_grad.setColorAt(0.0, QColor(56, 189, 248, int(68 + 30 * t)))
-                bg_grad.setColorAt(1.0, QColor(37, 99, 235, int(48 + 25 * t)))
-                p.setPen(QPen(QColor(56, 189, 248, int(130 + 60 * t)), 1.15))
+                bg_grad.setColorAt(0.0, QColor(56, 189, 248, int(68 + 30 * tc)))
+                bg_grad.setColorAt(1.0, QColor(37, 99, 235, int(48 + 25 * tc)))
+                p.setPen(QPen(QColor(56, 189, 248, int(130 + 60 * tc)), 1.15))
                 p.setBrush(QBrush(bg_grad))
                 p.drawRoundedRect(QRectF(1.5, 1.5, w - 3.0, h - 3.0), r, r)
                 fg = QColor("#7dd3fc")
             else:
-                bg_alpha = int(20 + 34 * t)
-                border_alpha = int(28 + 48 * t)
+                bg_alpha = int(20 + 34 * tc)
+                border_alpha = int(28 + 48 * tc)
                 p.setPen(QPen(QColor(255, 255, 255, border_alpha), 1.05))
                 p.setBrush(QColor(255, 255, 255, bg_alpha))
                 p.drawRoundedRect(QRectF(1.5, 1.5, w - 3.0, h - 3.0), r, r)
-                fg = QColor("#ffffff") if t > 0.3 else QColor("#cbd5e1")
+                fg = QColor("#ffffff") if tc > 0.3 else QColor("#cbd5e1")
 
             pen = QPen(fg, 1.85, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
             p.setPen(pen)
@@ -2151,8 +2154,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             return QRectF(left, 0.0, float(self._notch_w), float(self._notch_h))
 
         def _update_notch_frame(self, w: float, h: float) -> None:
-            self._notch_w = float(w)
-            self._notch_h = float(h)
+            self._notch_w = max(48.0, float(w))
+            self._notch_h = max(2.5, float(h))
             if getattr(self, "_tucked_dodge", False) and self.state == "idle" and h <= 6.0:
                 # When tucked out of the way of a browser tab, only mask the top 2 pixels (y=0..2)
                 # so the entire browser tab / title bar underneath is 100% OS click-through!
@@ -2376,15 +2379,24 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._fade_anim.start()
 
             self._anim.stop()
-            self._anim.setDuration(duration_ms)
+            # Silky Apple Dynamic Island spring curves with tasteful bounce on every transition
             if new_state == "hover":
-                curve = QEasingCurve.Type.OutBack
+                curve = QEasingCurve(QEasingCurve.Type.OutBack)
+                curve.setOvershoot(1.38)
+                eff_dur = max(360, duration_ms)
             elif new_state == "idle":
-                curve = QEasingCurve.Type.InOutQuint
+                curve = QEasingCurve(QEasingCurve.Type.OutBack)
+                curve.setOvershoot(0.72)
+                eff_dur = max(480, duration_ms)
             elif was_expanded and is_expanding:
-                curve = QEasingCurve.Type.InOutQuint
+                curve = QEasingCurve(QEasingCurve.Type.OutBack)
+                curve.setOvershoot(0.98)
+                eff_dur = max(500, duration_ms)
             else:
-                curve = QEasingCurve.Type.OutQuint
+                curve = QEasingCurve(QEasingCurve.Type.OutBack)
+                curve.setOvershoot(1.18)
+                eff_dur = max(560, duration_ms)
+            self._anim.setDuration(eff_dur)
             self._anim.setEasingCurve(curve)
             self._anim.setStartValue(QSizeF(float(self._notch_w), float(self._notch_h)))
             self._anim.setEndValue(QSizeF(float(tw), float(th)))
@@ -2927,15 +2939,26 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             cur_w = self._dash_media_container.maximumWidth()
             if cur_w > 500:
                 cur_w = 224 if self._dash_media_container.isVisible() else 0
+            # Silky spring pop when sliding out, magnetic anticipation + cushioned settle when pulling back in
+            if expand:
+                m_curve = QEasingCurve(QEasingCurve.Type.OutBack)
+                m_curve.setOvershoot(1.08)
+                m_dur = 620
+            else:
+                m_curve = QEasingCurve(QEasingCurve.Type.InOutBack)
+                m_curve.setOvershoot(0.68)
+                m_dur = 660
+            self._media_panel_anim.setDuration(m_dur)
+            self._media_panel_anim.setEasingCurve(m_curve)
             self._media_panel_anim.setStartValue(float(cur_w))
             self._media_panel_anim.setEndValue(float(target_w))
             self._media_panel_anim.start()
 
-            # Simultaneously morph the outer notch silhouette smoothly with InOutQuart magnetic pull!
+            # Simultaneously morph the outer notch silhouette in lockstep with the same silky spring curve!
             tw, th = self.SIZES["dashboard_music" if expand else "dashboard"]
             self._anim.stop()
-            self._anim.setDuration(580)
-            self._anim.setEasingCurve(QEasingCurve.Type.InOutQuart)
+            self._anim.setDuration(m_dur)
+            self._anim.setEasingCurve(m_curve)
             self._anim.setStartValue(QSizeF(float(self._notch_w), float(self._notch_h)))
             self._anim.setEndValue(QSizeF(float(tw), float(th)))
             self._anim.start()
