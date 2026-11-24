@@ -192,8 +192,8 @@ def query_windows_clock_sync() -> dict[str, Any]:
 class WindowsClockTracker:
     """Maintains a smooth 60fps interpolated Timer / Stopwatch state synced with Windows Clock."""
 
-    # Windows schedules alarm toasts ~1.0s after the visual countdown reaches 00:00
-    TIMER_TOAST_OFFSET_SEC = 1.0
+    # Exact alignment with Windows Clock's floor-displayed countdown (no artificial offset)
+    TIMER_TOAST_OFFSET_SEC = 0.0
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
