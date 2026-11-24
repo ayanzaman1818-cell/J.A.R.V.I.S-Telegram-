@@ -2245,7 +2245,11 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             local = self.mapFromGlobal(pos)
             cx = CANVAS_W / 2.0
             in_center_x = abs(local.x() - cx) <= 165.0
-            if self.state in ("idle", "hover"):
+            is_closing_anim = (
+                self.state == "idle"
+                and self._anim.state() == QVariantAnimation.State.Running
+            )
+            if self.state in ("idle", "hover") and not is_closing_anim:
                 if in_center_x and local.y() <= 2:
                     # User deliberately pushed cursor to the very top pixel edge of the monitor -> untuck & hover/open
                     if self._tucked_dodge:
@@ -2313,6 +2317,11 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     raw_mw += 1
                 mask_w = min(CANVAS_W, raw_mw)
                 mask_h = min(CANVAS_H, int(math.ceil(self._notch_h)) + 6)
+                # While _content_root is fading out on close, never let setMask clip its QGraphicsOpacityEffect rect
+                # (Qt blanks QGraphicsOpacityEffect on Windows the instant the window mask shrinks inside its bounds!)
+                if getattr(self, "_fading_out", False) and hasattr(self, "_content_root"):
+                    mask_w = min(CANVAS_W, max(mask_w, self._content_root.width() + 40))
+                    mask_h = min(CANVAS_H, max(mask_h, self._content_root.height() + 16))
                 mask_left = (CANVAS_W - mask_w) // 2
                 self.setMask(QRegion(QRect(mask_left, 0, mask_w, mask_h)))
 
@@ -2335,8 +2344,10 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             t = max(0.0, min(1.0, float(val)))
             if hasattr(self, "_opacity_effect") and self._opacity_effect is not None:
                 self._opacity_effect.setOpacity(t)
-            if t <= 0.01 and self.state not in ("dashboard", "suggestions", "chat", "voice"):
+            if t <= 0.01 and getattr(self, "_fading_out", False):
+                self._fading_out = False
                 self._content_root.hide()
+            self.update()
 
         def _sample_top_app_color(self) -> None:
             """Sample 2 pixels immediately left & right of the notch on the active app's titlebar and compute a subtle darker/lighter shade."""
@@ -2561,23 +2572,27 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             if not is_expanding:
                 if self._content_root.isVisible():
                     already_fading_out = (
-                        self._fade_anim.state() == QVariantAnimation.State.Running
-                        and float(self._fade_anim.endValue() or 1.0) <= 0.01
+                        getattr(self, "_fading_out", False)
+                        and self._fade_anim.state() == QVariantAnimation.State.Running
                     )
                     if not already_fading_out:
                         self._fade_anim.stop()
                         cur_op = float(self._opacity_effect.opacity())
                         if cur_op > 0.02:
-                            self._fade_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-                            self._fade_anim.setDuration(340)
+                            self._fading_out = True
+                            self._fade_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
+                            self._fade_anim.setDuration(260)
                             self._fade_anim.setStartValue(cur_op)
                             self._fade_anim.setEndValue(0.0)
                             self._fade_anim.start()
                         else:
+                            self._fading_out = False
                             self._content_root.hide()
                 else:
+                    self._fading_out = False
                     self._fade_anim.stop()
             else:
+                self._fading_out = False
                 self._fade_anim.stop()
                 # Set _content_root geometry AND initial opacity=0.0 BEFORE showing so there is ZERO 1-frame flash!
                 start_op = 0.20 if was_expanded else 0.0
@@ -2651,7 +2666,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
         # --- Hover & Click Events on the Notch ---
 
         def enterEvent(self, event: Any) -> None:
-            if self.state == "idle":
+            if self.state == "idle" and self._anim.state() != QVariantAnimation.State.Running:
                 local = self.mapFromGlobal(QCursor.pos())
                 # Only trigger hover expansion when pushing the cursor to the very top 2px edge of the screen;
                 # if the cursor enters from below (e.g. aiming for a browser tab underneath), tuck out of the way!
