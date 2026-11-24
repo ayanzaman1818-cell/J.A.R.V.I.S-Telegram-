@@ -2236,9 +2236,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 mask_left = (CANVAS_W - mask_w) // 2
                 self.setMask(QRegion(QRect(mask_left, 0, mask_w, mask_h)))
 
-            # Lock content container strictly to the exact target expanded width (NEVER grow with OutBack overshoot!)
-            # so the Music Tab & Dashboard widgets stay 100% rock-solid while the black notch silhouette springs around them.
-            slide_offset = getattr(self, "_slide_y", 0.0)
+            # Lock content container strictly to the exact target expanded width & y=8
+            # so Calendar, System Monitor & Music Tab NEVER shift position during open/bounce!
             pad_x = 18
             _mp_anim = getattr(self, "_media_panel_anim", None)
             if _mp_anim is not None and _mp_anim.state() == QVariantAnimation.State.Running:
@@ -2249,15 +2248,13 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             left = (CANVAS_W - cur_w_even) // 2 + pad_x
             inner_w = max(10, cur_w_even - pad_x * 2)
             inner_h = max(10, int(round(getattr(self, "_target_h", self._notch_h))) - 14)
-            self._content_root.setGeometry(left, int(round(8.0 + slide_offset)), inner_w, inner_h)
+            self._content_root.setGeometry(left, 8, inner_w, inner_h)
             self.update()
 
         def _on_fade_frame(self, val: Any) -> None:
-            t = float(val)
-            self._slide_y = (1.0 - t) * -10.0
+            t = max(0.0, min(1.0, float(val)))
             if hasattr(self, "_opacity_effect") and self._opacity_effect is not None:
                 self._opacity_effect.setOpacity(t)
-            self._update_notch_frame(self._notch_w, self._notch_h)
 
         def _sample_top_app_color(self) -> None:
             """Sample 2 pixels immediately left & right of the notch on the active app's titlebar and compute a subtle darker/lighter shade."""
@@ -2448,52 +2445,49 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             if not is_expanding:
                 self._content_root.hide()
             else:
+                # Set _content_root to its final target geometry BEFORE showing it so Calendar & System Monitor NEVER jump!
+                pad_x = 18
+                cur_w_even = int(round(float(tw) / 2.0)) * 2
+                self._content_root.setGeometry(
+                    (CANVAS_W - cur_w_even) // 2 + pad_x,
+                    8,
+                    max(10, cur_w_even - pad_x * 2),
+                    max(10, int(round(float(th))) - 14),
+                )
                 self._switch_stack_page(new_state, opening_fresh=(not was_expanded))
                 start_op = 0.25 if was_expanded else 0.0
                 self._opacity_effect.setOpacity(start_op)
-                self._fade_anim.setDuration(max(320, int(duration_ms * 0.85)))
+                self._fade_anim.setDuration(max(360, int(duration_ms * 0.75)))
                 self._fade_anim.setStartValue(start_op)
                 self._fade_anim.setEndValue(1.0)
                 self._fade_anim.start()
 
-            # True Apple Dynamic Island underdamped harmonic spring physics:
-            # s(t) = 1 - e^(-decay * t) * cos(2.5 * pi * t) -> s(0)=0, s(1)=1 exactly, fast silky launch + organic bounce!
-            if new_state == "hover":
-                self._start_spring_morph(float(tw), float(th), duration_ms=440, decay=6.5)
-            elif new_state == "idle":
-                self._start_spring_morph(float(tw), float(th), duration_ms=720, decay=6.4)
-            elif was_expanded and is_expanding:
-                self._start_spring_morph(float(tw), float(th), duration_ms=560, decay=7.4)
-            else:
-                self._start_spring_morph(float(tw), float(th), duration_ms=620, decay=6.9)
-
-        def _start_spring_morph(self, tw: float, th: float, duration_ms: int = 620, decay: float = 6.9) -> None:
-            """Launch a true damped harmonic spring morph (fast launch, tasteful elastic bounce, velvety settle)."""
-            self._spring_w0 = float(self._notch_w)
-            self._spring_h0 = float(self._notch_h)
-            self._spring_w1 = float(tw)
-            self._spring_h1 = float(th)
-            self._spring_decay = float(decay)
-            self._spring_freq = 2.5 * math.pi
+            # Silky, properly-paced OutBack spring curves (smooth launch -> tasteful visible bounce -> velvety settle)
             self._anim.stop()
-            self._anim.setDuration(int(duration_ms))
-            self._anim.setEasingCurve(QEasingCurve.Type.Linear)
-            self._anim.setStartValue(0.0)
-            self._anim.setEndValue(1.0)
+            if new_state == "hover":
+                curve = QEasingCurve(QEasingCurve.Type.OutBack)
+                curve.setOvershoot(1.95)
+                eff_dur = 440
+            elif new_state == "idle":
+                curve = QEasingCurve(QEasingCurve.Type.InOutQuart)
+                eff_dur = 580
+            elif was_expanded and is_expanding:
+                curve = QEasingCurve(QEasingCurve.Type.OutBack)
+                curve.setOvershoot(1.55)
+                eff_dur = 540
+            else:
+                curve = QEasingCurve(QEasingCurve.Type.OutBack)
+                curve.setOvershoot(1.85)
+                eff_dur = 600
+            self._anim.setDuration(eff_dur)
+            self._anim.setEasingCurve(curve)
+            self._anim.setStartValue(QSizeF(float(self._notch_w), float(self._notch_h)))
+            self._anim.setEndValue(QSizeF(float(tw), float(th)))
             self._anim.start()
 
         def _on_anim_frame(self, val: Any) -> None:
             if isinstance(val, (QSizeF, QSize)):
                 self._update_notch_frame(float(val.width()), float(val.height()))
-            else:
-                t = max(0.0, min(1.0, float(val)))
-                if t >= 1.0:
-                    s = 1.0
-                else:
-                    s = 1.0 - math.exp(-self._spring_decay * t) * math.cos(self._spring_freq * t)
-                w = self._spring_w0 + (self._spring_w1 - self._spring_w0) * s
-                h = self._spring_h0 + (self._spring_h1 - self._spring_h0) * s
-                self._update_notch_frame(w, h)
 
         def _on_anim_finished(self) -> None:
             if self.state in ("dashboard", "suggestions", "chat", "voice"):
@@ -3041,19 +3035,16 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._media_panel_anim.setEndValue(float(target_w))
             self._media_panel_anim.start()
 
-            # Simultaneously morph the outer notch silhouette in lockstep with silky spring physics!
+            # Simultaneously morph the outer notch silhouette in lockstep with the same silky curve!
             tw, th = self.SIZES["dashboard_music" if expand else "dashboard"]
             self._target_w = float(tw)
             self._target_h = float(th)
-            if expand:
-                self._start_spring_morph(float(tw), float(th), duration_ms=640, decay=7.0)
-            else:
-                self._anim.stop()
-                self._anim.setDuration(m_dur)
-                self._anim.setEasingCurve(m_curve)
-                self._anim.setStartValue(QSizeF(float(self._notch_w), float(self._notch_h)))
-                self._anim.setEndValue(QSizeF(float(tw), float(th)))
-                self._anim.start()
+            self._anim.stop()
+            self._anim.setDuration(m_dur)
+            self._anim.setEasingCurve(m_curve)
+            self._anim.setStartValue(QSizeF(float(self._notch_w), float(self._notch_h)))
+            self._anim.setEndValue(QSizeF(float(tw), float(th)))
+            self._anim.start()
 
         def _on_media_panel_anim(self, val: Any) -> None:
             w = max(0, int(round(float(val))))
