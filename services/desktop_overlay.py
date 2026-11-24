@@ -3514,8 +3514,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._chat_output = QTextBrowser()
             self._chat_output.setOpenExternalLinks(True)
             self._chat_output.setStyleSheet(
-                "QTextBrowser { background: rgba(15, 23, 42, 0.52); color: #f1f5f9; "
-                "border: 1px solid rgba(255,255,255,0.11); border-radius: 16px; "
+                "QTextBrowser { background: rgba(255, 255, 255, 0.04); color: #f1f5f9; "
+                "border: none; border-radius: 16px; "
                 "padding: 10px 12px; font-size: 13px; font-family: 'SF Pro Text', 'SF Pro Display', sans-serif; }"
             )
             self._chat_output.hide()
@@ -3533,12 +3533,11 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._approve_btn.hide()
             layout.addWidget(self._approve_btn, alignment=Qt.AlignmentFlag.AlignRight)
 
-            # Stadium Input Pill (Image 4 exact layout)
+            # Stadium Input Pill (clean borderless dark surface)
             pill_bar = QFrame()
             pill_bar.setFixedHeight(52)
             pill_bar.setStyleSheet(
-                "QFrame { background: #101217; border: 1px solid rgba(255,255,255,0.28); "
-                "border-radius: 26px; }"
+                "QFrame { background: #13161d; border: none; border-radius: 26px; }"
             )
             pl = QHBoxLayout(pill_bar)
             pl.setContentsMargins(8, 6, 8, 6)
