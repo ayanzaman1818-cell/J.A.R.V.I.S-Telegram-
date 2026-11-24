@@ -225,25 +225,42 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
         cy: float,
         mic_active: bool,
         cam_active: bool,
+        with_labels: bool = False,
     ) -> None:
-        """Draw crisp iOS/macOS orange (mic) and green (camera) privacy indicator dots."""
-        dots: list[QColor] = []
+        """Draw crisp iOS/macOS orange (mic) and green (camera) privacy indicator dots (optionally with MIC/CAM labels)."""
+        items: list[tuple[QColor, str]] = []
         if mic_active:
-            dots.append(QColor("#ff9f0a"))
+            items.append((QColor("#ff9f0a"), "MIC"))
         if cam_active:
-            dots.append(QColor("#30d158"))
-        if not dots:
+            items.append((QColor("#30d158"), "CAM"))
+        if not items:
             return
+        if with_labels:
+            item_w = 42.0
+            total_w = len(items) * item_w
+            start_x = cx - total_w / 2.0
+            p.setFont(QFont("SF Pro Display", 7, QFont.Weight.ExtraBold))
+            for i, (col, lbl) in enumerate(items):
+                bx = start_x + i * item_w
+                dot_x = bx + 9.0
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(col.red(), col.green(), col.blue(), 95))
+                p.drawEllipse(QPointF(dot_x, cy), 4.8, 4.8)
+                p.setBrush(col)
+                p.drawEllipse(QPointF(dot_x, cy), 2.8, 2.8)
+                p.setPen(col)
+                p.drawText(QRectF(dot_x + 6.0, cy - 7.0, 28.0, 14.0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, lbl)
+            return
+
         spacing = 10.0
-        start_x = cx - ((len(dots) - 1) * spacing) / 2.0
+        start_x = cx - ((len(items) - 1) * spacing) / 2.0
         p.setPen(Qt.PenStyle.NoPen)
-        for i, col in enumerate(dots):
+        for i, (col, _lbl) in enumerate(items):
             dx = start_x + i * spacing
-            glow = QColor(col.red(), col.green(), col.blue(), 80)
-            p.setBrush(glow)
-            p.drawEllipse(QPointF(dx, cy), 4.6, 4.6)
+            p.setBrush(QColor(col.red(), col.green(), col.blue(), 95))
+            p.drawEllipse(QPointF(dx, cy), 4.8, 4.8)
             p.setBrush(col)
-            p.drawEllipse(QPointF(dx, cy), 2.7, 2.7)
+            p.drawEllipse(QPointF(dx, cy), 2.9, 2.9)
 
     # ------------------------------------------------------------------
     # 2. Custom Vector Weather Badge Widget (for Dashboard Calendar)

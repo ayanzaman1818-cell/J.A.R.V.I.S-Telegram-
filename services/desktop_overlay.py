@@ -2661,6 +2661,10 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 inner_w = max(10, cur_w_even - pad_x * 2)
                 inner_h = max(10, int(round(getattr(self, "_target_h", self._notch_h))) - 14)
                 self._content_root.setGeometry(left, 8, inner_w, inner_h)
+            if hasattr(self, "_privacy_badge_overlay"):
+                r_edge = int(round((CANVAS_W + self._notch_w) / 2.0))
+                self._privacy_badge_overlay.move(r_edge - 34, 4)
+                self._privacy_badge_overlay.raise_()
             self.update()
 
         def _on_fade_frame(self, val: Any) -> None:
@@ -2829,10 +2833,19 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 except Exception:
                     pass
 
-            # Privacy Indicators (Mic/Camera ConsentStore, internally cached 1.0s)
+            # Privacy Indicators (Hardware CoreAudio + Win32 FrameServer + JARVIS own mic/mirror)
             priv = self.service._privacy_tracker.get_status()
-            self._priv_mic = bool(priv.get("mic_active"))
-            self._priv_cam = bool(priv.get("cam_active"))
+            new_mic = bool(priv.get("mic_active")) or bool(self.service._mic.is_recording)
+            new_cam = bool(priv.get("cam_active")) or bool(
+                hasattr(self, "_tools_page") and getattr(self._tools_page._mirror, "_active", False)
+            )
+            priv_changed = (new_mic != self._priv_mic) or (new_cam != self._priv_cam)
+            self._priv_mic = new_mic
+            self._priv_cam = new_cam
+            if priv_changed:
+                if hasattr(self, "_privacy_badge_overlay"):
+                    self._privacy_badge_overlay.set_state(new_mic, new_cam)
+                self.update()
 
             # Active Downloads Watcher (~/Downloads, internally cached 1.0s)
             dl = self.service._downloads_watcher.get_status()
@@ -3446,10 +3459,10 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
                 p.restore()
             elif self.state == "idle" and (getattr(self, "_priv_mic", False) or getattr(self, "_priv_cam", False)) and nh >= 12:
-                # Standalone Glowing Mic (orange) / Camera (green) Privacy Indicator Pill
+                # Standalone Glowing Mic (orange) / Camera (green) Privacy Indicator Pill with crisp labels
                 p.save()
                 p.setClipPath(path)
-                _EXTRAS["draw_privacy_dots"](p, cx, nh / 2.0, bool(self._priv_mic), bool(self._priv_cam))
+                _EXTRAS["draw_privacy_dots"](p, cx, nh / 2.0, bool(self._priv_mic), bool(self._priv_cam), with_labels=True)
                 p.restore()
             elif self.state == "hover":
                 # Glowing emerald status dot + crisp 'JARVIS' micro-label ONLY when actively hovering the notch
@@ -3517,6 +3530,32 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
             root_layout.addWidget(self._stack)
             self._content_root.hide()
+
+            # Always-on-top transparent Privacy Dot Overlay (glowing orange Mic / green Cam) so it is NEVER covered by child widgets
+            class _PrivacyDotOverlay(QWidget):
+                def __init__(self, parent: QWidget) -> None:
+                    super().__init__(parent)
+                    self._mic = False
+                    self._cam = False
+                    self.setFixedSize(30, 14)
+                    self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+                    self.hide()
+
+                def set_state(self, mic: bool, cam: bool) -> None:
+                    self._mic = mic
+                    self._cam = cam
+                    self.setVisible(mic or cam)
+                    self.update()
+
+                def paintEvent(self, _ev: Any) -> None:
+                    if not (self._mic or self._cam):
+                        return
+                    p = QPainter(self)
+                    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                    _EXTRAS["draw_privacy_dots"](p, self.width() / 2.0, self.height() / 2.0, self._mic, self._cam)
+
+            self._privacy_badge_overlay = _PrivacyDotOverlay(self)
+            self._privacy_badge_overlay.raise_()
 
             # Auto-refresh dashboard every 2.5 seconds while visible
             self._dash_timer = QTimer(self)
@@ -3715,29 +3754,35 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._dash_div1.setStyleSheet("background: rgba(255,255,255,0.12);")
             row.addWidget(self._dash_div1, alignment=Qt.AlignmentFlag.AlignVCenter)
 
-            # ================= SECTION 2: CALENDAR STRIP + LIVE CLOCK + NEXT EVENT (Center) =================
+            # ================= SECTION 2: MONTH + WEATHER + TOP-RIGHT TIME + 7-DAY STRIP + QUICK FOCUS BAR =================
             cal_col = QVBoxLayout()
             cal_col.setSpacing(4)
             cal_col.setContentsMargins(2, 2, 2, 0)
 
+            # Top row: Month + Weather on the left, Live 12-Hour Time cleanly on the TOP RIGHT!
             top_cal_row = QHBoxLayout()
-            top_cal_row.setSpacing(10)
+            top_cal_row.setSpacing(6)
 
-            month_weather_col = QVBoxLayout()
-            month_weather_col.setSpacing(0)
-            month_weather_col.setContentsMargins(0, 0, 0, 0)
             self._dash_month_lbl = QLabel("Nov")
             self._dash_month_lbl.setStyleSheet(
-                "color: #ffffff; font-size: 22px; font-weight: 800; background: transparent;"
+                "color: #ffffff; font-size: 18px; font-weight: 800; background: transparent;"
             )
             self._weather_badge = _EXTRAS["WeatherBadgeWidget"]()
-            month_weather_col.addWidget(self._dash_month_lbl)
-            month_weather_col.addWidget(self._weather_badge)
-            top_cal_row.addLayout(month_weather_col)
+            self._dash_clock_lbl = QLabel("10:18 PM")
+            self._dash_clock_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self._dash_clock_lbl.setStyleSheet(
+                "color: #ffffff; font-size: 14px; font-weight: 800; letter-spacing: 0.3px; background: transparent;"
+            )
+            top_cal_row.addWidget(self._dash_month_lbl, alignment=Qt.AlignmentFlag.AlignVCenter)
+            top_cal_row.addWidget(self._weather_badge, alignment=Qt.AlignmentFlag.AlignVCenter)
+            top_cal_row.addStretch(1)
+            top_cal_row.addWidget(self._dash_clock_lbl, alignment=Qt.AlignmentFlag.AlignVCenter)
+            cal_col.addLayout(top_cal_row)
 
             # 7-day calendar strip (M T W T F S S)
             week_row = QHBoxLayout()
-            week_row.setSpacing(5)
+            week_row.setSpacing(6)
+            week_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._dash_week_day_lbls: list[QLabel] = []
             self._dash_week_num_lbls: list[QLabel] = []
             for _ in range(7):
@@ -3755,16 +3800,38 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 week_row.addLayout(dc)
                 self._dash_week_day_lbls.append(dl)
                 self._dash_week_num_lbls.append(nl)
-            top_cal_row.addLayout(week_row)
-            cal_col.addLayout(top_cal_row)
+            cal_col.addLayout(week_row)
 
-            # Crisp Centered Clock + Next Event Pill
-            self._dash_clock_lbl = QLabel("14:48")
-            self._dash_clock_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._dash_clock_lbl.setStyleSheet(
-                "color: #ffffff; font-size: 19px; font-weight: 800; letter-spacing: 0.6px; background: transparent;"
-            )
-            cal_col.addWidget(self._dash_clock_lbl)
+            # Freed center space: Instant 1-Click Quick Focus Timers (5m / 15m / 25m) + Mirror & Clipboard pills!
+            quick_row = QHBoxLayout()
+            quick_row.setSpacing(4)
+            quick_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            for mins, lbl in ((5, "5m"), (15, "15m"), (25, "25m")):
+                tb = QPushButton(lbl)
+                tb.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+                tb.setFixedHeight(20)
+                tb.setToolTip(f"Start a {mins}-minute orange focus timer in the notch")
+                tb.setStyleSheet(
+                    "QPushButton { background: rgba(255,159,10,0.14); color: #ff9f0a; border: none; "
+                    "border-radius: 7px; padding: 0 7px; font-size: 9.5px; font-weight: 800; }"
+                    "QPushButton:hover { background: rgba(255,159,10,0.28); color: #ffffff; }"
+                )
+                tb.clicked.connect(lambda _c=False, m=mins: self._on_start_quick_timer(m * 60, f"{m}m Focus"))
+                quick_row.addWidget(tb)
+
+            for tab_i, lbl, tip in ((2, "Mirror", "Open live full-notch Webcam Mirror"), (1, "Clip", "Open Clipboard History")):
+                qb = QPushButton(lbl)
+                qb.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+                qb.setFixedHeight(20)
+                qb.setToolTip(tip)
+                qb.setStyleSheet(
+                    "QPushButton { background: rgba(255,255,255,0.08); color: #cbd5e1; border: none; "
+                    "border-radius: 7px; padding: 0 7px; font-size: 9.5px; font-weight: 700; }"
+                    "QPushButton:hover { background: rgba(56,189,248,0.22); color: #ffffff; }"
+                )
+                qb.clicked.connect(lambda _c=False, ti=tab_i: self._open_tools_hub(ti))
+                quick_row.addWidget(qb)
+            cal_col.addLayout(quick_row)
 
             ev_row = QHBoxLayout()
             ev_row.setSpacing(5)
