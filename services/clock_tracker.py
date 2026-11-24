@@ -1,11 +1,11 @@
 """Zero-dependency Windows Clock (Microsoft.WindowsAlarms) live Timer & Stopwatch tracker.
 
 - Timers: Reads exact scheduled timer end timestamps directly from Windows
-  ToastNotificationManager (`Microsoft.WindowsAlarms_8wekyb3d8bbwe!App`), so
-  active countdown timers are detected with millisecond accuracy EVEN WHEN the
-  Windows Clock window is minimized or closed!
-- Stopwatches: Reads active running Stopwatch via Windows UI Automation when
-  the Windows Clock window is open, and smoothly interpolates at 60fps.
+  ToastNotificationManager (`Microsoft.WindowsAlarms_8wekyb3d8bbwe!App`), aligned
+  to Windows Clock's exact displayed second even when Clock is minimized or closed.
+- Stopwatches: Reads active running Stopwatch via Windows UI Automation (supports
+  both numeric `HH:MM:SS.cc` and Win11 spoken accessibility formats + Lap-button
+  running detection) and continues smooth 60fps ticking even if Clock is minimized.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
@@ -21,8 +22,7 @@ from typing import Any
 log = logging.getLogger("jarvis.clock_tracker")
 
 _PS_CLOCK_SCRIPT = r"""
-# 1. Check Windows Clock Scheduled Timer Toasts (works even when Clock app is minimized or closed!)
-$bestTimerDue = 0.0
+$timerDue = 0.0
 try {
     [Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime] | Out-Null
     $tn = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Microsoft.WindowsAlarms_8wekyb3d8bbwe!App')
@@ -35,77 +35,121 @@ try {
             $dueMs = $x.DeliveryTime.ToUnixTimeMilliseconds()
             if ($dueMs -gt $nowMs) {
                 $dueSec = $dueMs / 1000.0
-                if ($bestTimerDue -eq 0.0 -or $dueSec -lt $bestTimerDue) {
-                    $bestTimerDue = $dueSec
+                if ($timerDue -eq 0.0 -or $dueSec -lt $timerDue) {
+                    $timerDue = $dueSec
                 }
             }
         }
     }
 } catch {}
 
-if ($bestTimerDue -gt 0.0) {
-    Write-Output ("MODE=timer|DUE=" + [math]::Round($bestTimerDue, 3))
-    exit 0
-}
+$swRunning = $false
+$swTime = ""
+$clockWinFound = $false
+$timeProcAlive = [bool](Get-Process -Name 'Time' -ErrorAction SilentlyContinue)
 
-# 2. Check Windows Clock UI Automation for an active running Stopwatch (when Clock window is open)
 try {
     Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
     $root = [System.Windows.Automation.AutomationElement]::RootElement
-    $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, 'Clock')
-    $win = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $cond)
+    $wins = $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
+    $win = $null
+    foreach ($w in $wins) {
+        try {
+            $wn = [string]$w.Current.Name
+            $wc = [string]$w.Current.ClassName
+            if ($wn -eq 'Clock' -or ($wc -eq 'ApplicationFrameWindow' -and $wn -match 'Clock')) {
+                $win = $w
+                break
+            }
+        } catch {}
+    }
     if ($win) {
+        $clockWinFound = $true
         $all = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
-        $swTime = ""
-        $swRunning = $false
+        $hasPauseBtn = $false
+        $lapEnabled = $false
+        $onStopwatchTab = $false
         foreach ($el in $all) {
             try {
                 $aid = [string]$el.Current.AutomationId
                 $nm = [string]$el.Current.Name
                 $ct = $el.Current.ControlType.ProgrammaticName
-                if (($ct -eq 'ControlType.Button') -and ($nm -match '^Pause') -and ($aid -match 'Stopwatch|PlayPause')) {
-                    $swRunning = $true
+
+                if ($aid -match 'Stopwatch' -or $nm -match 'Stopwatch') {
+                    $onStopwatchTab = $true
                 }
-                if ($aid -match 'Stopwatch' -and $nm -match '(\d{1,2}:\d{2}:\d{2}(?:\.\d+)?|\d{1,2}:\d{2}\.\d+)') {
+                if ($ct -eq 'ControlType.Button') {
+                    if ($nm -match 'Pause' -and ($aid -match 'Stopwatch|PlayPause' -or $nm -match 'stopwatch|Pause$')) {
+                        $hasPauseBtn = $true
+                    }
+                    if (($nm -match '^Lap' -or $aid -match 'Lap') -and $el.Current.IsEnabled) {
+                        $lapEnabled = $true
+                        $onStopwatchTab = $true
+                    }
+                }
+                if ($aid -match 'StopwatchTimer|StopwatchTime') {
+                    if ($nm) { $swTime = $nm }
+                } elseif (-not $swTime -and $nm -match '(\d{1,2}:\d{2}:\d{2}\.\d{1,2}|\d{1,2}:\d{2}\.\d{1,2})') {
                     $swTime = $Matches[1]
-                } elseif ($nm -match '(\d{1,2}:\d{2}:\d{2}\.\d{1,2})') {
-                    $swTime = $Matches[1]
+                } elseif (-not $swTime -and $onStopwatchTab -and $nm -match '(\d+\s*hour|\d+\s*minute|\d+\s*second)') {
+                    $swTime = $nm
                 }
             } catch {}
         }
-        if ($swRunning -and $swTime) {
-            Write-Output ("MODE=stopwatch|TIME=" + $swTime)
-            exit 0
+        if (($lapEnabled -or ($hasPauseBtn -and $onStopwatchTab)) -and $swTime) {
+            $swRunning = $true
         }
     }
 } catch {}
 
-Write-Output "IDLE"
+if ($swRunning -and $swTime) {
+    Write-Output ("MODE=stopwatch|TIME=" + $swTime + "|WIN=1|ALIVE=" + [int]$timeProcAlive)
+} elseif ($timerDue -gt 0.0) {
+    Write-Output ("MODE=timer|DUE=" + [math]::Round($timerDue, 3) + "|WIN=" + [int]$clockWinFound + "|ALIVE=" + [int]$timeProcAlive)
+} else {
+    Write-Output ("MODE=idle|WIN=" + [int]$clockWinFound + "|ALIVE=" + [int]$timeProcAlive)
+}
 """.strip()
 
 _ENCODED_CLOCK_PS = base64.b64encode(_PS_CLOCK_SCRIPT.encode("utf-16le")).decode("ascii")
 
 
-def _parse_hms_to_seconds(text: str) -> float:
-    """Parse 'HH:MM:SS', 'MM:SS', or 'HH:MM:SS.cc' into seconds."""
+def _parse_clock_time_to_seconds(text: str) -> float:
+    """Parse numeric ('00:05.23', '01:02:03.45') OR Win11 spoken ('0 hours, 1 minute, 23 seconds') strings."""
     clean = (text or "").strip()
     if not clean:
         return 0.0
-    parts = clean.split(":")
-    try:
-        if len(parts) == 3:
-            return int(parts[0]) * 3600.0 + int(parts[1]) * 60.0 + float(parts[2])
-        if len(parts) == 2:
-            return int(parts[0]) * 60.0 + float(parts[1])
-    except ValueError:
-        pass
-    return 0.0
+
+    # 1. Numeric HH:MM:SS(.cc) or MM:SS(.cc)
+    m_num = re.search(r"(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.(\d+))?", clean)
+    if m_num:
+        a = int(m_num.group(1))
+        b = int(m_num.group(2))
+        c = int(m_num.group(3)) if m_num.group(3) is not None else None
+        frac = float("0." + m_num.group(4)) if m_num.group(4) else 0.0
+        if c is not None:
+            return a * 3600.0 + b * 60.0 + c + frac
+        return a * 60.0 + b + frac
+
+    # 2. Spoken Win11 UIA format: e.g. "0 hours, 1 minute, 23 seconds" or "12.4 seconds"
+    total = 0.0
+    matched = False
+    for pat, mult in (
+        (r"(\d+(?:\.\d+)?)\s*hour", 3600.0),
+        (r"(\d+(?:\.\d+)?)\s*minute", 60.0),
+        (r"(\d+(?:\.\d+)?)\s*second", 1.0),
+    ):
+        mh = re.search(pat, clean, re.IGNORECASE)
+        if mh:
+            total += float(mh.group(1)) * mult
+            matched = True
+    return total if matched else 0.0
 
 
 def query_windows_clock_sync() -> dict[str, Any]:
-    """Query Windows Clock for an active Timer (via Scheduled Toasts) or Stopwatch (via UIA)."""
+    """Query Windows Clock for an active Timer (Scheduled Toasts) or Stopwatch (UIA)."""
     if os.name != "nt":
-        return {"active": False, "mode": "", "due_ts": 0.0, "seconds": 0.0, "ts": time.time()}
+        return {"active": False, "mode": "", "due_ts": 0.0, "seconds": 0.0, "win": False, "alive": False, "ts": time.time()}
     try:
         res = subprocess.run(
             ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-EncodedCommand", _ENCODED_CLOCK_PS],
@@ -119,20 +163,43 @@ def query_windows_clock_sync() -> dict[str, Any]:
             line = out.splitlines()[-1]
             parts = dict(item.split("=", 1) for item in line.split("|") if "=" in item)
             mode = parts.get("MODE", "").strip().lower()
+            win_open = parts.get("WIN", "0").strip() == "1"
+            alive = parts.get("ALIVE", "0").strip() == "1"
+            now = time.time()
             if mode == "timer":
                 due_ts = float(parts.get("DUE", "0") or 0.0)
-                if due_ts > time.time():
-                    return {"active": True, "mode": "timer", "due_ts": due_ts, "seconds": 0.0, "ts": time.time()}
+                if due_ts > now:
+                    return {
+                        "active": True,
+                        "mode": "timer",
+                        "due_ts": due_ts,
+                        "seconds": 0.0,
+                        "win": win_open,
+                        "alive": alive,
+                        "ts": now,
+                    }
             elif mode == "stopwatch":
-                secs = _parse_hms_to_seconds(parts.get("TIME", ""))
-                return {"active": True, "mode": "stopwatch", "due_ts": 0.0, "seconds": secs, "ts": time.time()}
+                secs = _parse_clock_time_to_seconds(parts.get("TIME", ""))
+                return {
+                    "active": True,
+                    "mode": "stopwatch",
+                    "due_ts": 0.0,
+                    "seconds": secs,
+                    "win": True,
+                    "alive": alive,
+                    "ts": now,
+                }
+            return {"active": False, "mode": "", "due_ts": 0.0, "seconds": 0.0, "win": win_open, "alive": alive, "ts": now}
     except Exception:
         log.debug("Windows Clock poll failed", exc_info=True)
-    return {"active": False, "mode": "", "due_ts": 0.0, "seconds": 0.0, "ts": time.time()}
+    return {"active": False, "mode": "", "due_ts": 0.0, "seconds": 0.0, "win": False, "alive": False, "ts": time.time()}
 
 
 class WindowsClockTracker:
     """Maintains a smooth 60fps interpolated Timer / Stopwatch state synced with Windows Clock."""
+
+    # Windows schedules alarm toasts ~1.0s after the visual countdown reaches 00:00
+    TIMER_TOAST_OFFSET_SEC = 1.0
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -145,12 +212,12 @@ class WindowsClockTracker:
         self._polling: bool = False
 
     def trigger_poll_async(self) -> None:
-        """Non-blocking background poll every ~2.0s so active timers & stopwatches appear automatically."""
+        """Non-blocking background poll every ~1.8s so active timers & stopwatches stay synced."""
         now = time.time()
         with self._lock:
             if self._polling:
                 return
-            if now - self._last_poll_ts < 2.0:
+            if now - self._last_poll_ts < 1.8:
                 return
             self._polling = True
             self._last_poll_ts = now
@@ -159,11 +226,21 @@ class WindowsClockTracker:
             try:
                 data = query_windows_clock_sync()
                 with self._lock:
-                    self._active = bool(data["active"])
-                    self._mode = str(data["mode"])
-                    self._due_ts = float(data["due_ts"])
-                    self._base_seconds = float(data["seconds"])
-                    self._updated_ts = float(data["ts"])
+                    if data["active"]:
+                        self._active = True
+                        self._mode = str(data["mode"])
+                        self._due_ts = float(data["due_ts"])
+                        self._base_seconds = float(data["seconds"])
+                        self._updated_ts = float(data["ts"])
+                    else:
+                        # If a Stopwatch was running and the user simply minimized Clock (win=False, Time.exe still alive),
+                        # keep ticking smoothly until Clock is closed (alive=False) or reopened & paused (win=True)!
+                        if self._active and self._mode == "stopwatch" and (not data["win"]) and data["alive"]:
+                            pass
+                        else:
+                            self._active = False
+                            self._mode = ""
+                            self._due_ts = 0.0
             finally:
                 with self._lock:
                     self._polling = False
@@ -184,10 +261,10 @@ class WindowsClockTracker:
 
         now = time.time()
         if mode == "timer":
-            remaining = due_ts - now
+            remaining = (due_ts - self.TIMER_TOAST_OFFSET_SEC) - now
             if remaining <= 0.0:
                 return False, "", ""
-            total_s = int(remaining + 0.5)
+            total_s = int(remaining)
         else:
             elapsed = max(0.0, now - updated)
             total_s = int(base_sec + elapsed)
