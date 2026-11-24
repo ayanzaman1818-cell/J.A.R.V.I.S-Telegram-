@@ -782,11 +782,14 @@ class DesktopOverlayService:
             fut = asyncio.run_coroutine_threadsafe(integ.calendar_today(ctx), loop)
             raw = fut.result(timeout=12.0)
             parsed_events: list[str] = []
-            # Parse summary lines or JSON from Composio calendar output
+            # Parse summary lines or JSON from Composio calendar output (skip calendar IDs / email addresses!)
             for m in re.finditer(r'"summary"\s*:\s*"([^"]+)"', raw or ""):
                 s = m.group(1).strip()
-                if s and s not in parsed_events:
-                    parsed_events.append(f"📅 Today: {s}")
+                if not s or "@" in s or s.lower() in ("primary", "holidays in bangladesh"):
+                    continue
+                entry = f"📅 Today: {s}"
+                if entry not in parsed_events:
+                    parsed_events.append(entry)
             self._cal_events_cache = parsed_events[:3]
             self._cal_events_ts = time.time()
         except Exception:
@@ -1677,7 +1680,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
         def __init__(self, tracker: Any, parent: QWidget | None = None) -> None:
             super().__init__(parent)
             self._tracker = tracker
-            self.setFixedSize(132, 22)
+            self.setFixedSize(118, 22)
             self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             self.setToolTip("Click or drag to seek song position")
             self._dragging: bool = False
@@ -1753,8 +1756,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             p.setFont(tf)
             left_txt = self._fmt_mmss(shown_pos) if dur > 0 else "0:00"
             right_txt = self._fmt_mmss(dur) if dur > 0 else "0:00"
-            p.drawText(QRectF(0, 0, w / 2.0, 11), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, left_txt)
-            p.drawText(QRectF(w / 2.0, 0, w / 2.0, 11), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, right_txt)
+            p.drawText(QRectF(2, 0, w / 2.0 - 2, 11), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, left_txt)
+            p.drawText(QRectF(w / 2.0, 0, w / 2.0 - 4, 11), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, right_txt)
 
             # Sleek interactive seek bar track
             bar_h = 4.5 if (self._hovered or self._dragging) else 3.2
@@ -1792,7 +1795,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             "idle_music": (212, 23),   # Sleek horizontal music strip: Album Cover + JARVIS + Blurry-Color Visualizer
             "hover": (176, 20),        # Slightly larger hovered pill with status dot + JARVIS text
             "hover_music": (248, 25),  # Hovered horizontal music strip
-            "dashboard": (790, 146),   # Wide sleek DockBar-style horizontal PC Dashboard strip!
+            "dashboard": (548, 142),   # Compact horizontal Dashboard when NO audio is playing (Calendar + System Monitor + Volume + Icons)
+            "dashboard_music": (790, 146), # Wide horizontal Dashboard WITH Media Player when audio is playing!
             "suggestions": (488, 516), # Connections hub card
             "chat": (556, 336),        # JARVIS Quick Chat card
             "chat_active": (556, 468), # JARVIS Quick Chat card with active conversation
@@ -2050,10 +2054,10 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._art_pixmap = None
                 self._art_pixmap_track = ""
 
-            # Automatically morph the idle/hover notch size when music starts or stops
+            # Automatically morph the idle/hover/dashboard notch size when music starts or stops
             if is_playing != self._music_playing_active:
                 self._music_playing_active = is_playing
-                if self.state in ("idle", "hover"):
+                if self.state in ("idle", "hover", "dashboard"):
                     self._animate_to(self.state, duration_ms=460)
 
             if not is_playing:
@@ -2103,6 +2107,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self.state = new_state
             if new_state == "chat" and self._has_messages:
                 key = "chat_active"
+            elif new_state == "dashboard" and getattr(self, "_music_playing_active", False):
+                key = "dashboard_music"
             elif new_state == "idle" and getattr(self, "_tucked_dodge", False):
                 key = "tucked"
             elif new_state == "idle" and getattr(self, "_music_playing_active", False):
@@ -2398,8 +2404,11 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(12)
 
-            # ================= SECTION 1: NOW PLAYING (Left) =================
-            media_wrap = QHBoxLayout()
+            # ================= SECTION 1: NOW PLAYING (Left — ONLY shown when audio is actively playing!) =================
+            self._dash_media_container = QWidget()
+            self._dash_media_container.setStyleSheet("background: transparent;")
+            media_wrap = QHBoxLayout(self._dash_media_container)
+            media_wrap.setContentsMargins(0, 0, 0, 0)
             media_wrap.setSpacing(10)
 
             self._dash_music_icon = QLabel("🎵")
@@ -2457,13 +2466,13 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             m_info.addStretch(1)
 
             media_wrap.addLayout(m_info)
-            row.addLayout(media_wrap)
+            row.addWidget(self._dash_media_container)
 
-            # Vertical hairline divider 1
-            div1 = QFrame()
-            div1.setFixedSize(1, 86)
-            div1.setStyleSheet("background: rgba(255,255,255,0.12);")
-            row.addWidget(div1, alignment=Qt.AlignmentFlag.AlignVCenter)
+            # Vertical hairline divider 1 (hidden when music section is hidden!)
+            self._dash_div1 = QFrame()
+            self._dash_div1.setFixedSize(1, 86)
+            self._dash_div1.setStyleSheet("background: rgba(255,255,255,0.12);")
+            row.addWidget(self._dash_div1, alignment=Qt.AlignmentFlag.AlignVCenter)
 
             # ================= SECTION 2: CALENDAR STRIP + LIVE CLOCK + NEXT EVENT (Center) =================
             cal_col = QVBoxLayout()
@@ -2663,39 +2672,48 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
             snap = self.service.fetch_dashboard_snapshot()
             media = snap["media"]
-            raw_track = str(media.get("track") or "Nothing Playing")
-            if " - " in raw_track:
-                artist_part, song_part = (p.strip() for p in raw_track.split(" - ", 1))
-            else:
-                song_part, artist_part = raw_track.strip(), str(media.get("source") or "Spotify Idle")
-            # Pixel-accurate eliding using the exact bold stylesheet font so long song names NEVER cross the divider line
-            from PySide6.QtGui import QFontMetrics
-            song_font = QFont("SF Pro Display")
-            song_font.setPixelSize(13)
-            song_font.setWeight(QFont.Weight.ExtraBold)
-            elided_song = QFontMetrics(song_font).elidedText(song_part, Qt.TextElideMode.ElideRight, 122)
+            is_playing_now = bool(media.get("playing"))
 
-            art_font = QFont("SF Pro Display")
-            art_font.setPixelSize(11)
-            art_font.setWeight(QFont.Weight.DemiBold)
-            elided_artist = QFontMetrics(art_font).elidedText(artist_part, Qt.TextElideMode.ElideRight, 122)
+            # Show the Media Player tab ONLY when audio is actively playing; hide it completely when paused/idle to save space!
+            if hasattr(self, "_dash_media_container"):
+                self._dash_media_container.setVisible(is_playing_now)
+            if hasattr(self, "_dash_div1"):
+                self._dash_div1.setVisible(is_playing_now)
 
-            self._dash_media_track.setText(elided_song)
-            self._dash_media_track.setToolTip(song_part)
-            self._dash_media_artist.setText(elided_artist)
-            self._dash_media_artist.setToolTip(artist_part)
+            if is_playing_now:
+                raw_track = str(media.get("track") or "Playing")
+                if " - " in raw_track:
+                    artist_part, song_part = (p.strip() for p in raw_track.split(" - ", 1))
+                else:
+                    song_part, artist_part = raw_track.strip(), str(media.get("source") or "Playing")
+                # Pixel-accurate eliding using the exact bold stylesheet font so long song names NEVER cross the divider line
+                from PySide6.QtGui import QFontMetrics
+                song_font = QFont("SF Pro Display")
+                song_font.setPixelSize(13)
+                song_font.setWeight(QFont.Weight.ExtraBold)
+                elided_song = QFontMetrics(song_font).elidedText(song_part, Qt.TextElideMode.ElideRight, 122)
 
-            if self._art_pixmap is not None and not self._art_pixmap.isNull():
-                scaled_art = self._art_pixmap.scaled(
-                    76,
-                    76,
-                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-                self._dash_music_icon.setPixmap(scaled_art)
-            else:
-                self._dash_music_icon.setPixmap(QPixmap())
-                self._dash_music_icon.setText("🎧" if media.get("playing") else "🎵")
+                art_font = QFont("SF Pro Display")
+                art_font.setPixelSize(11)
+                art_font.setWeight(QFont.Weight.DemiBold)
+                elided_artist = QFontMetrics(art_font).elidedText(artist_part, Qt.TextElideMode.ElideRight, 122)
+
+                self._dash_media_track.setText(elided_song)
+                self._dash_media_track.setToolTip(song_part)
+                self._dash_media_artist.setText(elided_artist)
+                self._dash_media_artist.setToolTip(artist_part)
+
+                if self._art_pixmap is not None and not self._art_pixmap.isNull():
+                    scaled_art = self._art_pixmap.scaled(
+                        76,
+                        76,
+                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                    self._dash_music_icon.setPixmap(scaled_art)
+                else:
+                    self._dash_music_icon.setPixmap(QPixmap())
+                    self._dash_music_icon.setText("🎧")
 
             # System Monitor: progress bars + Words (Low / Normal / High)
             cpu_w = max(6, int(76.0 * min(1.0, float(snap.get("cpu_pct", 10.0)) / 100.0)))
