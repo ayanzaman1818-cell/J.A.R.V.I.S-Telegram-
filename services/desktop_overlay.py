@@ -2316,19 +2316,19 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 mask_left = (CANVAS_W - mask_w) // 2
                 self.setMask(QRegion(QRect(mask_left, 0, mask_w, mask_h)))
 
-            # Lock content container strictly to the exact target expanded width & y=8
-            # so Calendar, System Monitor & Music Tab NEVER shift position during open/bounce!
-            pad_x = 18
-            _mp_anim = getattr(self, "_media_panel_anim", None)
-            if _mp_anim is not None and _mp_anim.state() == QVariantAnimation.State.Running:
-                content_w_src = self._notch_w
-            else:
-                content_w_src = getattr(self, "_target_w", self._notch_w)
-            cur_w_even = int(round(content_w_src / 2.0)) * 2
-            left = (CANVAS_W - cur_w_even) // 2 + pad_x
-            inner_w = max(10, cur_w_even - pad_x * 2)
-            inner_h = max(10, int(round(getattr(self, "_target_h", self._notch_h))) - 14)
-            self._content_root.setGeometry(left, 8, inner_w, inner_h)
+            # Keep _content_root at its full expanded geometry while fading out on close (never squish to 10px!)
+            if self.state in ("dashboard", "suggestions", "chat", "voice"):
+                pad_x = 18
+                _mp_anim = getattr(self, "_media_panel_anim", None)
+                if _mp_anim is not None and _mp_anim.state() == QVariantAnimation.State.Running:
+                    content_w_src = self._notch_w
+                else:
+                    content_w_src = getattr(self, "_target_w", self._notch_w)
+                cur_w_even = int(round(content_w_src / 2.0)) * 2
+                left = (CANVAS_W - cur_w_even) // 2 + pad_x
+                inner_w = max(10, cur_w_even - pad_x * 2)
+                inner_h = max(10, int(round(getattr(self, "_target_h", self._notch_h))) - 14)
+                self._content_root.setGeometry(left, 8, inner_w, inner_h)
             self.update()
 
         def _on_fade_frame(self, val: Any) -> None:
@@ -2562,8 +2562,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             if not is_expanding:
                 if was_expanded and self._content_root.isVisible():
                     cur_op = float(self._opacity_effect.opacity())
-                    self._fade_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
-                    self._fade_anim.setDuration(170)
+                    self._fade_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+                    self._fade_anim.setDuration(240)
                     self._fade_anim.setStartValue(cur_op)
                     self._fade_anim.setEndValue(0.0)
                     self._fade_anim.start()
