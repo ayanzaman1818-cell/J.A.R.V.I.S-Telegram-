@@ -707,19 +707,25 @@ class DesktopOverlayService:
         try:
             q = re.sub(r"\([^)]*\)|\[[^\]]*\]", "", track_title).replace(" - ", " ").strip()
             with httpx.Client(timeout=5.0) as client:
-                # Primary: Deezer Search API (instant, high-res 250x250 cover art)
+                # Primary: Deezer Search API (instant, high-res 500x500 / 1000x1000 cover art)
                 r_dz = client.get(f"https://api.deezer.com/search?q={quote(q)}&limit=1")
                 if r_dz.status_code == 200:
                     dz_data = (r_dz.json() or {}).get("data") or []
                     if dz_data:
                         album_obj = dz_data[0].get("album") or {}
-                        art_url = str(album_obj.get("cover_medium") or album_obj.get("cover") or "")
+                        art_url = str(
+                            album_obj.get("cover_big")
+                            or album_obj.get("cover_xl")
+                            or album_obj.get("cover_medium")
+                            or album_obj.get("cover")
+                            or ""
+                        )
                         if art_url:
                             art_res = client.get(art_url)
                             if art_res.status_code == 200:
                                 art_bytes = art_res.content
 
-                # Fallback: iTunes Search API
+                # Fallback: iTunes Search API (upgraded from 100x100 to crisp 600x600)
                 if not art_bytes:
                     r_it = client.get(f"https://itunes.apple.com/search?term={quote(q)}&media=music&limit=1")
                     if r_it.status_code == 200:
@@ -727,6 +733,7 @@ class DesktopOverlayService:
                         if results:
                             art_url = str(results[0].get("artworkUrl100") or "")
                             if art_url:
+                                art_url = art_url.replace("100x100bb", "600x600bb")
                                 art_res = client.get(art_url)
                                 if art_res.status_code == 200:
                                     art_bytes = art_res.content
@@ -2315,7 +2322,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             media = self.service.get_cached_now_playing()
             is_playing = bool(media.get("playing"))
 
-            # Refresh cached QPixmap when album art bytes arrive for the active track
+            # Refresh cached QPixmap + razor-sharp HiDPI Lanczos thumbnail when album art bytes arrive
             cur_bytes = self.service._current_art_bytes
             cur_track = self.service._current_art_track
             if cur_bytes and cur_track != self._art_pixmap_track:
@@ -2323,10 +2330,31 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 if not img.isNull():
                     self._art_pixmap = QPixmap.fromImage(img)
                     self._art_pixmap_track = cur_track
+                    # Pre-render a crisp HiDPI Lanczos-downscaled + subtly sharpened mini thumbnail for the 18x18 notch
+                    self._art_thumb_hi = None
+                    try:
+                        import io as _io
+                        from PIL import Image as _PILImage, ImageFilter as _PILFilter
+                        dpr = max(2.0, float(self.devicePixelRatioF() or 1.0))
+                        px_side = max(36, int(round(18.0 * dpr * 2.0)))
+                        pil_img = _PILImage.open(_io.BytesIO(cur_bytes)).convert("RGBA")
+                        pw, ph = pil_img.size
+                        crop_s = min(pw, ph)
+                        pil_img = pil_img.crop(((pw - crop_s) // 2, (ph - crop_s) // 2, (pw + crop_s) // 2, (ph + crop_s) // 2))
+                        pil_hi = pil_img.resize((px_side, px_side), _PILImage.Resampling.LANCZOS)
+                        pil_hi = pil_hi.filter(_PILFilter.UnsharpMask(radius=0.6, percent=95, threshold=2))
+                        buf = _io.BytesIO()
+                        pil_hi.save(buf, format="PNG")
+                        q_hi = QImage.fromData(buf.getvalue())
+                        if not q_hi.isNull():
+                            self._art_thumb_hi = QPixmap.fromImage(q_hi)
+                    except Exception:
+                        self._art_thumb_hi = None
                     if hasattr(self, "_dash_music_icon"):
                         self._dash_music_icon.set_pixmap(self._art_pixmap)
             elif not is_playing:
                 self._art_pixmap = None
+                self._art_thumb_hi = None
                 self._art_pixmap_track = ""
                 if hasattr(self, "_dash_music_icon") and time.time() >= getattr(self, "_dash_media_grace_until", 0.0):
                     self._dash_music_icon.set_pixmap(None)
@@ -2620,8 +2648,9 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 p.save()
                 p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
                 p.setClipPath(art_clip)
-                if self._art_pixmap is not None and not self._art_pixmap.isNull():
-                    p.drawPixmap(art_rect.toRect(), self._art_pixmap)
+                thumb_pm = getattr(self, "_art_thumb_hi", None) or self._art_pixmap
+                if thumb_pm is not None and not thumb_pm.isNull():
+                    p.drawPixmap(art_rect, thumb_pm, QRectF(0.0, 0.0, float(thumb_pm.width()), float(thumb_pm.height())))
                 else:
                     disc_g = QLinearGradient(art_x, art_y, art_x + art_size, art_y + art_size)
                     disc_g.setColorAt(0.0, c0)
