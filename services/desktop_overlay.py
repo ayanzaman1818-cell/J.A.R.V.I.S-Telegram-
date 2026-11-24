@@ -2456,33 +2456,44 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._fade_anim.setEndValue(1.0)
                 self._fade_anim.start()
 
-            self._anim.stop()
-            # Silky Apple Dynamic Island spring curves with tasteful bounce and zero sideways wobble
+            # True Apple Dynamic Island underdamped harmonic spring physics:
+            # s(t) = 1 - e^(-decay * t) * cos(2.5 * pi * t) -> s(0)=0, s(1)=1 exactly, fast silky launch + organic bounce!
             if new_state == "hover":
-                curve = QEasingCurve(QEasingCurve.Type.OutBack)
-                curve.setOvershoot(1.15)
-                eff_dur = max(360, duration_ms)
+                self._start_spring_morph(float(tw), float(th), duration_ms=440, decay=6.5)
             elif new_state == "idle":
-                curve = QEasingCurve(QEasingCurve.Type.OutBack)
-                curve.setOvershoot(0.62)
-                eff_dur = max(460, duration_ms)
+                self._start_spring_morph(float(tw), float(th), duration_ms=500, decay=8.2)
             elif was_expanded and is_expanding:
-                curve = QEasingCurve(QEasingCurve.Type.OutBack)
-                curve.setOvershoot(0.78)
-                eff_dur = max(480, duration_ms)
+                self._start_spring_morph(float(tw), float(th), duration_ms=560, decay=7.4)
             else:
-                curve = QEasingCurve(QEasingCurve.Type.OutBack)
-                curve.setOvershoot(0.95)
-                eff_dur = max(540, duration_ms)
-            self._anim.setDuration(eff_dur)
-            self._anim.setEasingCurve(curve)
-            self._anim.setStartValue(QSizeF(float(self._notch_w), float(self._notch_h)))
-            self._anim.setEndValue(QSizeF(float(tw), float(th)))
+                self._start_spring_morph(float(tw), float(th), duration_ms=620, decay=6.9)
+
+        def _start_spring_morph(self, tw: float, th: float, duration_ms: int = 620, decay: float = 6.9) -> None:
+            """Launch a true damped harmonic spring morph (fast launch, tasteful elastic bounce, velvety settle)."""
+            self._spring_w0 = float(self._notch_w)
+            self._spring_h0 = float(self._notch_h)
+            self._spring_w1 = float(tw)
+            self._spring_h1 = float(th)
+            self._spring_decay = float(decay)
+            self._spring_freq = 2.5 * math.pi
+            self._anim.stop()
+            self._anim.setDuration(int(duration_ms))
+            self._anim.setEasingCurve(QEasingCurve.Type.Linear)
+            self._anim.setStartValue(0.0)
+            self._anim.setEndValue(1.0)
             self._anim.start()
 
         def _on_anim_frame(self, val: Any) -> None:
             if isinstance(val, (QSizeF, QSize)):
                 self._update_notch_frame(float(val.width()), float(val.height()))
+            else:
+                t = max(0.0, min(1.0, float(val)))
+                if t >= 1.0:
+                    s = 1.0
+                else:
+                    s = 1.0 - math.exp(-self._spring_decay * t) * math.cos(self._spring_freq * t)
+                w = self._spring_w0 + (self._spring_w1 - self._spring_w0) * s
+                h = self._spring_h0 + (self._spring_h1 - self._spring_h0) * s
+                self._update_notch_frame(w, h)
 
         def _on_anim_finished(self) -> None:
             if self.state in ("dashboard", "suggestions", "chat", "voice"):
@@ -3030,16 +3041,19 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._media_panel_anim.setEndValue(float(target_w))
             self._media_panel_anim.start()
 
-            # Simultaneously morph the outer notch silhouette in lockstep with the same silky spring curve!
+            # Simultaneously morph the outer notch silhouette in lockstep with silky spring physics!
             tw, th = self.SIZES["dashboard_music" if expand else "dashboard"]
             self._target_w = float(tw)
             self._target_h = float(th)
-            self._anim.stop()
-            self._anim.setDuration(m_dur)
-            self._anim.setEasingCurve(m_curve)
-            self._anim.setStartValue(QSizeF(float(self._notch_w), float(self._notch_h)))
-            self._anim.setEndValue(QSizeF(float(tw), float(th)))
-            self._anim.start()
+            if expand:
+                self._start_spring_morph(float(tw), float(th), duration_ms=640, decay=7.0)
+            else:
+                self._anim.stop()
+                self._anim.setDuration(m_dur)
+                self._anim.setEasingCurve(m_curve)
+                self._anim.setStartValue(QSizeF(float(self._notch_w), float(self._notch_h)))
+                self._anim.setEndValue(QSizeF(float(tw), float(th)))
+                self._anim.start()
 
         def _on_media_panel_anim(self, val: Any) -> None:
             w = max(0, int(round(float(val))))
