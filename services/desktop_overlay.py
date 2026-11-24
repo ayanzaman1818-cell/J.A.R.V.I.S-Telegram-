@@ -1165,7 +1165,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
     )
 
     # Fixed motionless canvas dimensions anchored at top center of the primary screen
-    CANVAS_W = 860
+    CANVAS_W = 920
     CANVAS_H = 540
 
     class _VectorIconButton(QPushButton):
@@ -2172,13 +2172,18 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 mask_left = (CANVAS_W - mask_w) // 2
                 self.setMask(QRegion(QRect(mask_left, 0, mask_w, mask_h)))
 
-            # Keep content container centered and smoothly gliding down during transition
+            # Keep content container centered at its target expanded width so QHBoxLayout NEVER squeezes or jiggles sideways!
             slide_offset = getattr(self, "_slide_y", 0.0)
             pad_x = 18
-            cur_w_even = int(round(self._notch_w / 2.0)) * 2
+            _mp_anim = getattr(self, "_media_panel_anim", None)
+            if _mp_anim is not None and _mp_anim.state() == QVariantAnimation.State.Running:
+                content_w_src = self._notch_w
+            else:
+                content_w_src = max(self._notch_w, getattr(self, "_target_w", self._notch_w))
+            cur_w_even = int(round(content_w_src / 2.0)) * 2
             left = (CANVAS_W - cur_w_even) // 2 + pad_x
             inner_w = max(10, cur_w_even - pad_x * 2)
-            inner_h = max(10, int(round(self._notch_h)) - 14)
+            inner_h = max(10, int(round(max(self._notch_h, getattr(self, "_target_h", self._notch_h)))) - 14)
             self._content_root.setGeometry(left, int(round(8.0 + slide_offset)), inner_w, inner_h)
             self.update()
 
@@ -2255,9 +2260,13 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 if not img.isNull():
                     self._art_pixmap = QPixmap.fromImage(img)
                     self._art_pixmap_track = cur_track
+                    if hasattr(self, "_dash_music_icon"):
+                        self._dash_music_icon.set_pixmap(self._art_pixmap)
             elif not is_playing:
                 self._art_pixmap = None
                 self._art_pixmap_track = ""
+                if hasattr(self, "_dash_music_icon") and time.time() >= getattr(self, "_dash_media_grace_until", 0.0):
+                    self._dash_music_icon.set_pixmap(None)
 
             # Automatically morph the idle/hover/dashboard notch size when music starts or stops,
             # OR when the 20s pause grace window expires (magnetically sucking the Music Tab back into the notch!)
@@ -2295,8 +2304,10 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             if clean_song != getattr(self, "_idle_song_title", ""):
                 self._idle_song_title = clean_song
                 self._idle_marquee_t = 0.0
-                # Song changed -> immediately reset & re-sync GSMTC timeline automatically!
+                # Song changed -> immediately reset & re-sync GSMTC timeline AND update Dashboard labels automatically!
                 self.service._media_timeline.notify_track_changed()
+                if hasattr(self, "_dash_media_track"):
+                    self._sync_dash_track_labels(raw_t, str(media.get("source") or "Playing"))
             else:
                 self._idle_marquee_t = getattr(self, "_idle_marquee_t", 0.0) + (1.0 / 30.0)
                 # Keep GSMTC timeline continuously synced in the background regardless of notch state
@@ -2362,6 +2373,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             else:
                 key = new_state
             tw, th = self.SIZES.get(key, self.SIZES["idle"])
+            self._target_w = float(tw)
+            self._target_h = float(th)
 
             is_expanding = new_state in ("dashboard", "suggestions", "chat", "voice")
             was_expanded = prev_state in ("dashboard", "suggestions", "chat", "voice")
@@ -2370,7 +2383,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             if not is_expanding:
                 self._content_root.hide()
             else:
-                self._switch_stack_page(new_state)
+                self._switch_stack_page(new_state, opening_fresh=(not was_expanded))
                 start_op = 0.25 if was_expanded else 0.0
                 self._opacity_effect.setOpacity(start_op)
                 self._fade_anim.setDuration(max(320, int(duration_ms * 0.85)))
@@ -2379,23 +2392,23 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._fade_anim.start()
 
             self._anim.stop()
-            # Silky Apple Dynamic Island spring curves with tasteful bounce on every transition
+            # Silky Apple Dynamic Island spring curves with tasteful bounce and zero sideways wobble
             if new_state == "hover":
                 curve = QEasingCurve(QEasingCurve.Type.OutBack)
-                curve.setOvershoot(1.38)
+                curve.setOvershoot(1.15)
                 eff_dur = max(360, duration_ms)
             elif new_state == "idle":
                 curve = QEasingCurve(QEasingCurve.Type.OutBack)
-                curve.setOvershoot(0.72)
-                eff_dur = max(480, duration_ms)
+                curve.setOvershoot(0.62)
+                eff_dur = max(460, duration_ms)
             elif was_expanded and is_expanding:
                 curve = QEasingCurve(QEasingCurve.Type.OutBack)
-                curve.setOvershoot(0.98)
-                eff_dur = max(500, duration_ms)
+                curve.setOvershoot(0.78)
+                eff_dur = max(480, duration_ms)
             else:
                 curve = QEasingCurve(QEasingCurve.Type.OutBack)
-                curve.setOvershoot(1.18)
-                eff_dur = max(560, duration_ms)
+                curve.setOvershoot(0.95)
+                eff_dur = max(540, duration_ms)
             self._anim.setDuration(eff_dur)
             self._anim.setEasingCurve(curve)
             self._anim.setStartValue(QSizeF(float(self._notch_w), float(self._notch_h)))
@@ -2416,9 +2429,9 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             else:
                 self._content_root.hide()
 
-        def _switch_stack_page(self, mode: str) -> None:
+        def _switch_stack_page(self, mode: str, opening_fresh: bool = False) -> None:
             if mode == "dashboard":
-                self._refresh_dashboard()
+                self._refresh_dashboard(opening_fresh=opening_fresh)
                 self._stack.setCurrentIndex(0)
             elif mode == "suggestions":
                 self._refresh_suggestions()
@@ -2956,6 +2969,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
             # Simultaneously morph the outer notch silhouette in lockstep with the same silky spring curve!
             tw, th = self.SIZES["dashboard_music" if expand else "dashboard"]
+            self._target_w = float(tw)
+            self._target_h = float(th)
             self._anim.stop()
             self._anim.setDuration(m_dur)
             self._anim.setEasingCurve(m_curve)
@@ -2988,7 +3003,30 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             threading.Thread(target=_run, daemon=True).start()
             QTimer.singleShot(420, self._refresh_dashboard)
 
-        def _refresh_dashboard(self) -> None:
+        def _sync_dash_track_labels(self, raw_track: str, source: str = "Playing") -> None:
+            """Instantly update the Dashboard song title, artist, and squircle cover art without waiting for a click."""
+            if " - " in raw_track:
+                artist_part, song_part = (p.strip() for p in raw_track.split(" - ", 1))
+            else:
+                song_part, artist_part = raw_track.strip() or "Playing", source
+            from PySide6.QtGui import QFontMetrics
+            song_font = QFont("SF Pro Display")
+            song_font.setPixelSize(13)
+            song_font.setWeight(QFont.Weight.ExtraBold)
+            elided_song = QFontMetrics(song_font).elidedText(song_part, Qt.TextElideMode.ElideRight, 122)
+
+            art_font = QFont("SF Pro Display")
+            art_font.setPixelSize(11)
+            art_font.setWeight(QFont.Weight.DemiBold)
+            elided_artist = QFontMetrics(art_font).elidedText(artist_part, Qt.TextElideMode.ElideRight, 122)
+
+            self._dash_media_track.setText(elided_song)
+            self._dash_media_track.setToolTip(song_part)
+            self._dash_media_artist.setText(elided_artist)
+            self._dash_media_artist.setToolTip(artist_part)
+            self._dash_music_icon.set_pixmap(self._art_pixmap)
+
+        def _refresh_dashboard(self, opening_fresh: bool = False) -> None:
             """Update the wide DockBar-style Horizontal Dashboard with live Media, 7-Day Calendar, Clock, Events & System Monitor."""
             from datetime import timedelta as _td
 
@@ -3032,35 +3070,16 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
             # Keep panel visibility synced (animate smoothly if Dashboard is already open, snap cleanly when opening fresh)
             if hasattr(self, "_dash_media_container"):
-                if self.state == "dashboard" and self._media_panel_expanded != show_music_panel:
-                    self._set_dashboard_music_expanded(show_music_panel, animate=self._content_root.isVisible())
-                elif not self._content_root.isVisible():
+                if opening_fresh or not self._content_root.isVisible():
                     self._set_dashboard_music_expanded(show_music_panel, animate=False)
+                elif self.state == "dashboard" and self._media_panel_expanded != show_music_panel:
+                    self._set_dashboard_music_expanded(show_music_panel, animate=True)
 
             if is_playing_now:
-                raw_track = str(media.get("track") or "Playing")
-                if " - " in raw_track:
-                    artist_part, song_part = (p.strip() for p in raw_track.split(" - ", 1))
-                else:
-                    song_part, artist_part = raw_track.strip(), str(media.get("source") or "Playing")
-                # Pixel-accurate eliding using the exact bold stylesheet font so long song names NEVER cross the divider line
-                from PySide6.QtGui import QFontMetrics
-                song_font = QFont("SF Pro Display")
-                song_font.setPixelSize(13)
-                song_font.setWeight(QFont.Weight.ExtraBold)
-                elided_song = QFontMetrics(song_font).elidedText(song_part, Qt.TextElideMode.ElideRight, 122)
-
-                art_font = QFont("SF Pro Display")
-                art_font.setPixelSize(11)
-                art_font.setWeight(QFont.Weight.DemiBold)
-                elided_artist = QFontMetrics(art_font).elidedText(artist_part, Qt.TextElideMode.ElideRight, 122)
-
-                self._dash_media_track.setText(elided_song)
-                self._dash_media_track.setToolTip(song_part)
-                self._dash_media_artist.setText(elided_artist)
-                self._dash_media_artist.setToolTip(artist_part)
-
-                self._dash_music_icon.set_pixmap(self._art_pixmap)
+                self._sync_dash_track_labels(
+                    str(media.get("track") or "Playing"),
+                    str(media.get("source") or "Playing"),
+                )
 
             # System Monitor: progress bars + Words (Low / Normal / High)
             cpu_w = max(6, int(76.0 * min(1.0, float(snap.get("cpu_pct", 10.0)) / 100.0)))
