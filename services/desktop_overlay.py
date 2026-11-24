@@ -2079,21 +2079,13 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             path.quadTo(right, 0.0, right + ear, 0.0)
             path.closeSubpath()
 
-            # Solid pure black notch fill (#07080b)
+            # Solid pure black notch fill (#07080b) — no blue gradient glow!
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor("#07080b"))
             p.drawPath(path)
 
             if nh > 60:
-                p.save()
-                p.setClipPath(path)
-                glow = QRadialGradient(QPointF(cx, nh + 12.0), nw * 0.55)
-                glow.setColorAt(0.0, QColor(14, 165, 233, 54))
-                glow.setColorAt(0.55, QColor(30, 41, 59, 20))
-                glow.setColorAt(1.0, QColor(0, 0, 0, 0))
-                p.setBrush(QBrush(glow))
-                p.drawRect(QRectF(left - ear, 0, nw + ear * 2, nh))
-                p.restore()
+                pass
             elif self.state in ("idle", "hover") and getattr(self, "_music_playing_active", False) and nh >= 13:
                 # --- Sleek Horizontal Dynamic Island Music Strip (Pitch-Black Notch + Album Cover + Blurry Background-Colored Visualizer) ---
                 p.save()
@@ -2492,12 +2484,15 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 artist_part, song_part = (p.strip() for p in raw_track.split(" - ", 1))
             else:
                 song_part, artist_part = raw_track.strip(), str(media.get("source") or "Spotify Idle")
-            if len(song_part) > 20:
-                song_part = song_part[:18] + "…"
-            if len(artist_part) > 22:
-                artist_part = artist_part[:20] + "…"
-            self._dash_media_track.setText(song_part)
-            self._dash_media_artist.setText(artist_part)
+            # Pixel-accurate eliding with QFontMetrics so long song titles & artist names never clip or distort layout
+            fm_song = self._dash_media_track.fontMetrics()
+            elided_song = fm_song.elidedText(song_part, Qt.TextElideMode.ElideRight, 142)
+            fm_art = self._dash_media_artist.fontMetrics()
+            elided_artist = fm_art.elidedText(artist_part, Qt.TextElideMode.ElideRight, 142)
+            self._dash_media_track.setText(elided_song)
+            self._dash_media_track.setToolTip(song_part)
+            self._dash_media_artist.setText(elided_artist)
+            self._dash_media_artist.setToolTip(artist_part)
 
             if self._art_pixmap is not None and not self._art_pixmap.isNull():
                 scaled_art = self._art_pixmap.scaled(
