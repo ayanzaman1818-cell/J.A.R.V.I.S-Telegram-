@@ -730,8 +730,52 @@ class DesktopOverlayService:
             target=self._fetch_album_art_worker, args=(clean,), daemon=True
         ).start()
 
+    @staticmethod
+    def _fetch_gsmtc_thumbnail_bytes() -> bytes:
+        """Read the exact lossless album cover directly from Windows GSMTC (Spotify/Apple Music/Chrome memory)."""
+        if os.name != "nt":
+            return b""
+        try:
+            import base64 as _b64
+            import subprocess as _sp
+            ps_script = (
+                "Add-Type -AssemblyName System.Runtime.WindowsRuntime; "
+                "$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { "
+                "$_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]; "
+                "function Await($t, $r) { $m = $asTaskGeneric.MakeGenericMethod($r); $nt = $m.Invoke($null, @($t)); $nt.Wait(-1) | Out-Null; $nt.Result }; "
+                "[Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,Windows.Media.Control,ContentType=WindowsRuntime] | Out-Null; "
+                "[Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties,Windows.Media.Control,ContentType=WindowsRuntime] | Out-Null; "
+                "[Windows.Storage.Streams.IRandomAccessStreamWithContentType,Windows.Storage.Streams,ContentType=WindowsRuntime] | Out-Null; "
+                "$mgr = Await ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]); "
+                "$s = $mgr.GetCurrentSession(); "
+                "if (-not $s) { $all = $mgr.GetSessions(); if ($all -and $all.Count -gt 0) { $s = $all[0] } }; "
+                "if ($s) { "
+                "$mp = Await ($s.TryGetMediaPropertiesAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties]); "
+                "if ($mp -and $mp.Thumbnail) { "
+                "$st = Await ($mp.Thumbnail.OpenReadAsync()) ([Windows.Storage.Streams.IRandomAccessStreamWithContentType]); "
+                "$asStream = ([System.IO.WindowsRuntimeStreamExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsStreamForRead' -and $_.GetParameters().Count -eq 1 })[0]; "
+                "$net = $asStream.Invoke($null, @($st)); "
+                "$ms = New-Object System.IO.MemoryStream; $net.CopyTo($ms); "
+                "Write-Output ([Convert]::ToBase64String($ms.ToArray())) "
+                "} }"
+            )
+            enc = _b64.b64encode(ps_script.encode("utf-16le")).decode("ascii")
+            res = _sp.run(
+                ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-EncodedCommand", enc],
+                capture_output=True,
+                text=True,
+                timeout=4,
+                creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0),
+            )
+            b64_out = (res.stdout or "").strip()
+            if len(b64_out) > 200:
+                return _b64.b64decode(b64_out)
+        except Exception:
+            pass
+        return b""
+
     def _fetch_album_art_worker(self, track_title: str) -> None:
-        """Query iTunes Search API for the playing track's album cover & extract blurred dominant RGB colors."""
+        """Read exact embedded album cover directly from Windows GSMTC (100% accurate), with Deezer/iTunes fallback."""
         import io
         from urllib.parse import quote
         import httpx
@@ -743,38 +787,41 @@ class DesktopOverlayService:
             (52, 211, 153),
         ]
         try:
-            q = re.sub(r"\([^)]*\)|\[[^\]]*\]", "", track_title).replace(" - ", " ").strip()
-            with httpx.Client(timeout=5.0) as client:
-                # Primary: Deezer Search API (instant, high-res 500x500 / 1000x1000 cover art)
-                r_dz = client.get(f"https://api.deezer.com/search?q={quote(q)}&limit=1")
-                if r_dz.status_code == 200:
-                    dz_data = (r_dz.json() or {}).get("data") or []
-                    if dz_data:
-                        album_obj = dz_data[0].get("album") or {}
-                        art_url = str(
-                            album_obj.get("cover_big")
-                            or album_obj.get("cover_xl")
-                            or album_obj.get("cover_medium")
-                            or album_obj.get("cover")
-                            or ""
-                        )
-                        if art_url:
-                            art_res = client.get(art_url)
-                            if art_res.status_code == 200:
-                                art_bytes = art_res.content
+            # Primary: Exact lossless artwork straight from Windows GSMTC (Spotify / Apple Music / Chrome)
+            art_bytes = self._fetch_gsmtc_thumbnail_bytes()
 
-                # Fallback: iTunes Search API (upgraded from 100x100 to crisp 600x600)
-                if not art_bytes:
-                    r_it = client.get(f"https://itunes.apple.com/search?term={quote(q)}&media=music&limit=1")
-                    if r_it.status_code == 200:
-                        results = (r_it.json() or {}).get("results") or []
-                        if results:
-                            art_url = str(results[0].get("artworkUrl100") or "")
+            # Fallback ONLY if the media player did not publish a GSMTC Thumbnail
+            if not art_bytes:
+                q = re.sub(r"\([^)]*\)|\[[^\]]*\]", "", track_title).replace(" - ", " ").strip()
+                with httpx.Client(timeout=4.0) as client:
+                    r_dz = client.get(f"https://api.deezer.com/search?q={quote(q)}&limit=1")
+                    if r_dz.status_code == 200:
+                        dz_data = (r_dz.json() or {}).get("data") or []
+                        if dz_data:
+                            album_obj = dz_data[0].get("album") or {}
+                            art_url = str(
+                                album_obj.get("cover_big")
+                                or album_obj.get("cover_xl")
+                                or album_obj.get("cover_medium")
+                                or album_obj.get("cover")
+                                or ""
+                            )
                             if art_url:
-                                art_url = art_url.replace("100x100bb", "600x600bb")
                                 art_res = client.get(art_url)
                                 if art_res.status_code == 200:
                                     art_bytes = art_res.content
+
+                    if not art_bytes:
+                        r_it = client.get(f"https://itunes.apple.com/search?term={quote(q)}&media=music&limit=1")
+                        if r_it.status_code == 200:
+                            results = (r_it.json() or {}).get("results") or []
+                            if results:
+                                art_url = str(results[0].get("artworkUrl100") or "")
+                                if art_url:
+                                    art_url = art_url.replace("100x100bb", "600x600bb")
+                                    art_res = client.get(art_url)
+                                    if art_res.status_code == 200:
+                                        art_bytes = art_res.content
         except Exception:
             pass
 
@@ -2081,9 +2128,11 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             "generic": "Playing Media",
         }
 
-        def __init__(self, size: int = 18, parent: Optional[QWidget] = None) -> None:
+        def __init__(self, size: int = 22, parent: Optional[QWidget] = None) -> None:
             super().__init__(parent)
             self._source = "spotify"
+            self._cached_src: str = ""
+            self._cached_pm: Optional[QPixmap] = None
             self.setFixedSize(size, size)
             self.setToolTip(self._TOOLTIPS["spotify"])
 
@@ -2093,36 +2142,49 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 src = "generic"
             if src != self._source:
                 self._source = src
+                self._cached_src = ""
+                self._cached_pm = None
                 self.setToolTip(self._TOOLTIPS[src])
                 self.update()
 
-        def paintEvent(self, _event: Any) -> None:
-            p = QPainter(self)
+        def _render_hires_badge(self) -> QPixmap:
+            """Render the vector player icon at 4x supersampled resolution (88x88+) for razor-sharp HiDPI edges."""
+            scale = 4
+            sw = self.width() * scale
+            sh = self.height() * scale
+            img = QImage(sw, sh, QImage.Format.Format_ARGB32_Premultiplied)
+            img.fill(Qt.GlobalColor.transparent)
+            p = QPainter(img)
             p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            w, h = float(self.width()), float(self.height())
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+            w, h = float(sw), float(sh)
             cx, cy = w / 2.0, h / 2.0
-            r = min(w, h) / 2.0 - 0.8
+            r = min(w, h) / 2.0 - 2.0
 
             if self._source == "spotify":
-                # Authentic Spotify green circle + 3 curved dark sound-wave arcs
+                # Authentic Spotify green circle with subtle top sheen + 3 crisp curved dark sound-wave arcs
+                g = QLinearGradient(0.0, 0.0, 0.0, h)
+                g.setColorAt(0.0, QColor("#24d162"))
+                g.setColorAt(1.0, QColor("#18a84a"))
                 p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QColor("#1DB954"))
+                p.setBrush(QBrush(g))
                 p.drawEllipse(QPointF(cx, cy), r, r)
                 for y_off, half_w, curve_h, stroke in (
-                    (-2.3, 4.4, -1.6, 1.45),
-                    (0.1, 3.7, -1.3, 1.25),
-                    (2.3, 2.9, -1.0, 1.10),
+                    (-0.22 * r, 0.56 * r, -0.22 * r, 0.165 * r),
+                    (0.04 * r, 0.48 * r, -0.18 * r, 0.145 * r),
+                    (0.28 * r, 0.39 * r, -0.14 * r, 0.125 * r),
                 ):
                     arc = QPainterPath()
-                    arc.moveTo(cx - half_w, cy + y_off + 0.5)
-                    arc.quadTo(cx, cy + y_off + curve_h, cx + half_w, cy + y_off + 0.8)
+                    arc.moveTo(cx - half_w, cy + y_off + 0.06 * r)
+                    arc.quadTo(cx + 0.04 * r, cy + y_off + curve_h, cx + half_w, cy + y_off + 0.11 * r)
                     p.setPen(QPen(QColor("#07080b"), stroke, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
                     p.setBrush(Qt.BrushStyle.NoBrush)
                     p.drawPath(arc)
 
             elif self._source == "apple_music":
-                # Authentic Apple Music coral-red squircle + crisp white beamed double music note
-                sq = _make_squircle_path(QRectF(0.8, 0.8, w - 1.6, h - 1.6))
+                # Authentic Apple Music coral-red continuous squircle + razor-sharp white beamed double music note
+                sq = _make_squircle_path(QRectF(2.0, 2.0, w - 4.0, h - 4.0))
                 g = QLinearGradient(0.0, 0.0, 0.0, h)
                 g.setColorAt(0.0, QColor("#FA233B"))
                 g.setColorAt(1.0, QColor("#FB5C74"))
@@ -2130,27 +2192,35 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 p.setBrush(QBrush(g))
                 p.drawPath(sq)
                 # Crisp white double note
-                p.setPen(QPen(QColor("#ffffff"), 1.35, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-                p.drawLine(QPointF(cx - 2.0, cy + 3.2), QPointF(cx - 2.0, cy - 3.0))
-                p.drawLine(QPointF(cx + 3.2, cy + 2.2), QPointF(cx + 3.2, cy - 4.0))
-                p.drawLine(QPointF(cx - 2.0, cy - 3.0), QPointF(cx + 3.2, cy - 4.0))
+                sw_pen = max(3.5, 0.13 * r)
+                p.setPen(QPen(QColor("#ffffff"), sw_pen, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                p.drawLine(QPointF(cx - 0.18 * r, cy + 0.34 * r), QPointF(cx - 0.18 * r, cy - 0.30 * r))
+                p.drawLine(QPointF(cx + 0.36 * r, cy + 0.24 * r), QPointF(cx + 0.36 * r, cy - 0.42 * r))
+                # Thick top beam
+                beam = QPainterPath()
+                beam.moveTo(cx - 0.18 * r, cy - 0.30 * r)
+                beam.lineTo(cx + 0.36 * r, cy - 0.42 * r)
+                beam.lineTo(cx + 0.36 * r, cy - 0.24 * r)
+                beam.lineTo(cx - 0.18 * r, cy - 0.12 * r)
+                beam.closeSubpath()
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor("#ffffff"))
-                p.drawEllipse(QPointF(cx - 3.3, cy + 3.3), 1.75, 1.35)
-                p.drawEllipse(QPointF(cx + 1.9, cy + 2.3), 1.75, 1.35)
+                p.drawPath(beam)
+                p.drawEllipse(QPointF(cx - 0.32 * r, cy + 0.36 * r), 0.20 * r, 0.15 * r)
+                p.drawEllipse(QPointF(cx + 0.22 * r, cy + 0.26 * r), 0.20 * r, 0.15 * r)
 
             elif self._source == "youtube_music":
-                # Authentic YouTube Music red circle + crisp white ring + play triangle
+                # Authentic YouTube Music red circle + crisp white inner ring + play triangle
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor("#FF0000"))
                 p.drawEllipse(QPointF(cx, cy), r, r)
-                p.setPen(QPen(QColor("#ffffff"), 1.0))
+                p.setPen(QPen(QColor("#ffffff"), 0.10 * r))
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawEllipse(QPointF(cx, cy), r * 0.62, r * 0.62)
                 tri = QPainterPath()
-                tri.moveTo(cx - 1.6, cy - 2.5)
-                tri.lineTo(cx + 2.8, cy)
-                tri.lineTo(cx - 1.6, cy + 2.5)
+                tri.moveTo(cx - 0.16 * r, cy - 0.28 * r)
+                tri.lineTo(cx + 0.32 * r, cy)
+                tri.lineTo(cx - 0.16 * r, cy + 0.28 * r)
                 tri.closeSubpath()
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor("#ffffff"))
@@ -2160,35 +2230,52 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 # Authentic YouTube red rounded pill + white play triangle
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor("#FF0000"))
-                p.drawRoundedRect(QRectF(0.6, 2.4, w - 1.2, h - 4.8), 4.0, 4.0)
+                p.drawRoundedRect(QRectF(2.0, h * 0.14, w - 4.0, h * 0.72), r * 0.42, r * 0.42)
                 tri = QPainterPath()
-                tri.moveTo(cx - 1.9, cy - 2.6)
-                tri.lineTo(cx + 2.8, cy)
-                tri.lineTo(cx - 1.9, cy + 2.6)
+                tri.moveTo(cx - 0.20 * r, cy - 0.28 * r)
+                tri.lineTo(cx + 0.32 * r, cy)
+                tri.lineTo(cx - 0.20 * r, cy + 0.28 * r)
                 tri.closeSubpath()
                 p.setBrush(QColor("#ffffff"))
                 p.drawPath(tri)
 
             elif self._source == "soundcloud":
-                # Authentic SoundCloud orange rounded badge + white audio bars
+                # Authentic SoundCloud orange squircle + white audio bars
+                sq = _make_squircle_path(QRectF(2.0, 2.0, w - 4.0, h - 4.0))
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor("#FF5500"))
-                p.drawRoundedRect(QRectF(0.8, 0.8, w - 1.6, h - 1.6), 4.5, 4.5)
-                p.setPen(QPen(QColor("#ffffff"), 1.35, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-                for dx, bh in ((-3.8, 2.5), (-1.4, 4.5), (1.0, 5.2), (3.4, 3.6)):
-                    p.drawLine(QPointF(cx + dx, cy + 3.0), QPointF(cx + dx, cy + 3.0 - bh))
+                p.drawPath(sq)
+                p.setPen(QPen(QColor("#ffffff"), 0.15 * r, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                for dx, bh in ((-0.42 * r, 0.28 * r), (-0.15 * r, 0.50 * r), (0.12 * r, 0.58 * r), (0.39 * r, 0.40 * r)):
+                    p.drawLine(QPointF(cx + dx, cy + 0.32 * r), QPointF(cx + dx, cy + 0.32 * r - bh))
 
             else:
                 # Generic clean dark glass circle + white music note
-                p.setPen(QPen(QColor(255, 255, 255, 50), 0.9))
-                p.setBrush(QColor(255, 255, 255, 22))
+                p.setPen(QPen(QColor(255, 255, 255, 60), 3.0))
+                p.setBrush(QColor(255, 255, 255, 26))
                 p.drawEllipse(QPointF(cx, cy), r, r)
-                p.setPen(QPen(QColor("#e2e8f0"), 1.3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-                p.drawLine(QPointF(cx + 0.8, cy + 2.6), QPointF(cx + 0.8, cy - 3.2))
-                p.drawLine(QPointF(cx + 0.8, cy - 3.2), QPointF(cx + 3.4, cy - 2.2))
+                p.setPen(QPen(QColor("#e2e8f0"), 0.14 * r, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(cx + 0.08 * r, cy + 0.28 * r), QPointF(cx + 0.08 * r, cy - 0.34 * r))
+                p.drawLine(QPointF(cx + 0.08 * r, cy - 0.34 * r), QPointF(cx + 0.38 * r, cy - 0.22 * r))
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor("#e2e8f0"))
-                p.drawEllipse(QPointF(cx - 0.8, cy + 2.8), 1.8, 1.4)
+                p.drawEllipse(QPointF(cx - 0.08 * r, cy + 0.30 * r), 0.20 * r, 0.15 * r)
+
+            p.end()
+            return QPixmap.fromImage(img)
+
+        def paintEvent(self, _event: Any) -> None:
+            if self._cached_pm is None or self._cached_src != self._source:
+                self._cached_pm = self._render_hires_badge()
+                self._cached_src = self._source
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            p.drawPixmap(
+                QRectF(0.0, 0.0, float(self.width()), float(self.height())),
+                self._cached_pm,
+                QRectF(0.0, 0.0, float(self._cached_pm.width()), float(self._cached_pm.height())),
+            )
 
     def _draw_timer_icon(
         p: QPainter,
@@ -3168,10 +3255,10 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
             art_col = QVBoxLayout()
             art_col.setContentsMargins(0, 2, 0, 0)
-            art_col.setSpacing(4)
+            art_col.setSpacing(3)
             art_col.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._dash_music_icon = _SquircleAlbumArt(78)
-            self._dash_source_badge = _MusicSourceBadge(18)
+            self._dash_music_icon = _SquircleAlbumArt(74)
+            self._dash_source_badge = _MusicSourceBadge(22)
             art_col.addWidget(self._dash_music_icon, alignment=Qt.AlignmentFlag.AlignHCenter)
             art_col.addWidget(self._dash_source_badge, alignment=Qt.AlignmentFlag.AlignHCenter)
             media_wrap.addLayout(art_col)
