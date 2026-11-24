@@ -402,6 +402,12 @@ class DesktopOverlayService:
         self._now_playing_ts: float = 0.0
         self._album_art_cache: dict[str, dict[str, Any]] = {}
         self._album_fetching_track: str = ""
+        self._art_http_client: Any = None
+        self._art_cache_dir = config.BASE_DIR / ".cache" / "album_art"
+        try:
+            self._art_cache_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
         self._current_art_bytes: bytes = b""
         self._current_art_track: str = ""
         self._current_art_palette: list[tuple[int, int, int]] = [
@@ -707,18 +713,28 @@ class DesktopOverlayService:
             (52, 211, 153),
         ]
         try:
+            import hashlib
             q = re.sub(r"\([^)]*\)|\[[^\]]*\]", "", track_title).replace(" - ", " ").strip()
-            with httpx.Client(timeout=5.0) as client:
-                # Primary: Deezer Search API (instant, high-res 500x500 / 1000x1000 cover art)
+            cache_key = hashlib.md5(q.lower().encode("utf-8", errors="ignore")).hexdigest()
+            disk_path = getattr(self, "_art_cache_dir", config.BASE_DIR / ".cache" / "album_art") / f"{cache_key}.jpg"
+
+            # 0ms Instant Local Disk Cache hit!
+            if disk_path.exists() and disk_path.stat().st_size > 500:
+                art_bytes = disk_path.read_bytes()
+
+            if not art_bytes:
+                if self._art_http_client is None:
+                    self._art_http_client = httpx.Client(timeout=3.5, http2=False)
+                client = self._art_http_client
+                # Primary: Deezer Search API with keep-alive TCP/TLS + crisp 250x250 cover_medium (~80ms download!)
                 r_dz = client.get(f"https://api.deezer.com/search?q={quote(q)}&limit=1")
                 if r_dz.status_code == 200:
                     dz_data = (r_dz.json() or {}).get("data") or []
                     if dz_data:
                         album_obj = dz_data[0].get("album") or {}
                         art_url = str(
-                            album_obj.get("cover_big")
-                            or album_obj.get("cover_xl")
-                            or album_obj.get("cover_medium")
+                            album_obj.get("cover_medium")
+                            or album_obj.get("cover_big")
                             or album_obj.get("cover")
                             or ""
                         )
@@ -727,7 +743,7 @@ class DesktopOverlayService:
                             if art_res.status_code == 200:
                                 art_bytes = art_res.content
 
-                # Fallback: iTunes Search API (upgraded from 100x100 to crisp 600x600)
+                # Fallback: iTunes Search API (300x300 — fast & razor-sharp for 78x78 / 18x18 squircles)
                 if not art_bytes:
                     r_it = client.get(f"https://itunes.apple.com/search?term={quote(q)}&media=music&limit=1")
                     if r_it.status_code == 200:
@@ -735,10 +751,16 @@ class DesktopOverlayService:
                         if results:
                             art_url = str(results[0].get("artworkUrl100") or "")
                             if art_url:
-                                art_url = art_url.replace("100x100bb", "600x600bb")
+                                art_url = art_url.replace("100x100bb", "300x300bb")
                                 art_res = client.get(art_url)
                                 if art_res.status_code == 200:
                                     art_bytes = art_res.content
+
+                if art_bytes:
+                    try:
+                        disk_path.write_bytes(art_bytes)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -3273,12 +3295,13 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._dash_play_btn.update()
                 self._play_btn_optimistic_until = time.time() + 1.8
                 with self.service._media_timeline._lock:
-                    if not new_playing and self.service._media_timeline._playing:
-                        el = max(0.0, time.time() - self.service._media_timeline._updated_ts)
+                    if not new_playing and self.service._media_timeline._playing and self.service._media_timeline._perf_anchor > 0:
+                        el = max(0.0, (time.perf_counter() - self.service._media_timeline._perf_anchor) * self.service._media_timeline._rate)
                         self.service._media_timeline._pos = min(
                             self.service._media_timeline._duration,
                             self.service._media_timeline._pos + el,
                         )
+                    self.service._media_timeline._perf_anchor = time.perf_counter()
                     self.service._media_timeline._updated_ts = time.time()
                     self.service._media_timeline._playing = new_playing
 
