@@ -1987,7 +1987,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
         SIZES: dict[str, tuple[int, int]] = {
             "tucked": (76, 3),         # Ultra-thin 3px top edge micro-line when cursor approaches tabs/titlebar below
             "idle": (96, 7),           # Compact micro-strip at top center when no music is playing
-            "idle_music": (212, 23),   # Sleek horizontal music strip: Album Cover + JARVIS + Blurry-Color Visualizer
+            "idle_music": (236, 24),   # Sleek horizontal music strip: Squircle Album Cover + Live Track & Progress + Visualizer
             "hover": (176, 20),        # Slightly larger hovered pill with status dot + JARVIS text
             "hover_music": (248, 25),  # Hovered horizontal music strip
             "dashboard": (548, 142),   # Compact horizontal Dashboard when NO audio is playing (Calendar + System Monitor + Volume + Icons)
@@ -2278,7 +2278,22 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     self._dash_play_btn.update()
 
             if not is_playing:
+                self._idle_song_title = ""
+                self._idle_marquee_t = 0.0
                 return
+
+            # Parse clean song title for the idle music notch marquee
+            raw_t = str(media.get("track") or "").strip()
+            if " - " in raw_t:
+                _a, _s = raw_t.split(" - ", 1)
+                clean_song = _s.strip() or raw_t
+            else:
+                clean_song = raw_t
+            if clean_song != getattr(self, "_idle_song_title", ""):
+                self._idle_song_title = clean_song
+                self._idle_marquee_t = 0.0
+            else:
+                self._idle_marquee_t = getattr(self, "_idle_marquee_t", 0.0) + (1.0 / 30.0)
 
             # Sample live Windows WASAPI master audio peak (0.0 .. 1.0) with balanced, natural responsiveness
             raw_peak = self.service._audio_meter.get_peak()
@@ -2530,20 +2545,69 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawPath(art_clip)
 
-                # 2. Center: Crisp "JARVIS" label in the middle between the Album Cover and Visualizer
-                p.setPen(QColor(226, 232, 240, 215))
-                font = QFont("SF Pro Display", 8, QFont.Weight.Bold)
-                font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.8)
-                p.setFont(font)
-                p.drawText(QRectF(left, 0.0, nw, nh), Qt.AlignmentFlag.AlignCenter, "JARVIS")
-
-                # 3. Right Side: Live Audio Visualizer (colored with the blurry album background palette on the pure black notch)
+                # 3. Right Side geometry (calculated before center so the song title & progress bar never collide)
                 bars = self._vis_bars
                 bar_w = 2.6
                 gap = 2.1
                 vis_total_w = len(bars) * bar_w + (len(bars) - 1) * gap
                 vis_right_pad = 10.0
                 vis_start_x = right - vis_right_pad - vis_total_w
+
+                # 2. Center: Live Track Title (smooth marquee for long titles) + Live Album-Tinted Progress Hairline
+                center_left = art_x + art_size + 8.0
+                center_right = vis_start_x - 8.0
+                center_w = max(20.0, center_right - center_left)
+
+                song_text = getattr(self, "_idle_song_title", "") or "Now Playing"
+                pos_s, dur_s, _tl_playing = self.service._media_timeline.current_position()
+                prog_ratio = max(0.0, min(1.0, pos_s / dur_s)) if dur_s > 0 else 0.0
+
+                title_font = QFont("SF Pro Display", 8, QFont.Weight.DemiBold)
+                p.setFont(title_font)
+                from PySide6.QtGui import QFontMetricsF
+                fm = QFontMetricsF(title_font)
+                text_w = fm.horizontalAdvance(song_text)
+
+                title_rect = QRectF(center_left, 1.5, center_w, nh - 6.5)
+                p.save()
+                p.setClipRect(title_rect)
+                p.setPen(QColor(241, 245, 249, 238))
+                if text_w <= center_w:
+                    p.drawText(title_rect, Qt.AlignmentFlag.AlignCenter, song_text)
+                else:
+                    # Smooth continuous marquee: 2.0s pause at start, glide at 24px/s, 1.2s pause at end, loop seamlessly
+                    scroll_dist = text_w - center_w + 6.0
+                    speed = 24.0
+                    scroll_dur = scroll_dist / speed
+                    pause_start = 2.0
+                    pause_end = 1.2
+                    cycle = pause_start + scroll_dur + pause_end
+                    t_mod = getattr(self, "_idle_marquee_t", 0.0) % cycle
+                    if t_mod < pause_start:
+                        offset = 0.0
+                    elif t_mod < pause_start + scroll_dur:
+                        offset = (t_mod - pause_start) * speed
+                    else:
+                        offset = scroll_dist
+                    draw_r = QRectF(center_left - offset, title_rect.y(), text_w + 10.0, title_rect.height())
+                    p.drawText(draw_r, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, song_text)
+                p.restore()
+
+                # Sleek 1.8px live album-tinted track progress hairline directly below the title
+                bar_y = nh - 4.0
+                bar_h = 1.8
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(255, 255, 255, 34))
+                p.drawRoundedRect(QRectF(center_left, bar_y, center_w, bar_h), 0.9, 0.9)
+                if prog_ratio > 0.005:
+                    fill_w = max(2.0, center_w * prog_ratio)
+                    prog_grad = QLinearGradient(center_left, bar_y, center_left + center_w, bar_y)
+                    prog_grad.setColorAt(0.0, c0)
+                    prog_grad.setColorAt(1.0, c1)
+                    p.setBrush(QBrush(prog_grad))
+                    p.drawRoundedRect(QRectF(center_left, bar_y, fill_w, bar_h), 0.9, 0.9)
+
+                # 3. Right Side: Live Audio Visualizer (colored with the blurry album background palette on the pure black notch)
 
                 max_bar_h = max(10.0, nh - 6.0)
                 cy_vis = nh / 2.0
