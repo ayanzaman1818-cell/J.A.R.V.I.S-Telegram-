@@ -2376,22 +2376,27 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 # Keep GSMTC timeline continuously synced in the background regardless of notch state
                 self.service._media_timeline.trigger_poll_async(force=False)
 
-            # Real-time 60fps raw Windows WASAPI master audio peak (0.0 .. 1.0) — zero boosting or artificial gain!
+            # Real-time 60fps Windows WASAPI decibel (dB) metering (-42 dB .. 0 dB) — true acoustic loudness, zero fake boost!
             raw_peak = max(0.0, min(1.0, float(self.service._audio_meter.get_peak())))
-            self._vis_phase += 0.11 + raw_peak * 0.16
+            if raw_peak > 1e-4:
+                db_val = 20.0 * math.log10(raw_peak)
+                level = max(0.0, min(1.0, (db_val + 42.0) / 42.0))
+            else:
+                level = 0.0
+            self._vis_phase += 0.12 + level * 0.20
 
             bar_shapes = (0.76, 0.94, 1.00, 0.92, 0.82, 0.70)
             phase_offsets = (0.0, 1.15, 2.35, 0.75, 1.95, 3.15)
 
             for i in range(len(self._vis_bars)):
-                wave = 0.45 + 0.55 * abs(math.sin(self._vis_phase * (0.95 + i * 0.14) + phase_offsets[i]))
-                target = max(0.08, min(1.0, raw_peak * bar_shapes[i] * wave))
+                wave = 0.35 + 0.65 * abs(math.sin(self._vis_phase * (0.95 + i * 0.15) + phase_offsets[i]))
+                target = max(0.08, min(1.0, level * bar_shapes[i] * wave))
                 prev = self._vis_bars[i]
                 # Crisp real-time 60fps attack and natural decay
                 if target > prev:
-                    self._vis_bars[i] = prev * 0.45 + target * 0.55
+                    self._vis_bars[i] = prev * 0.38 + target * 0.62
                 else:
-                    self._vis_bars[i] = prev * 0.75 + target * 0.25
+                    self._vis_bars[i] = prev * 0.72 + target * 0.28
 
             if self.state in ("idle", "hover"):
                 self.update()
