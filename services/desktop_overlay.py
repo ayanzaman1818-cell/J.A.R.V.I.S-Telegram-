@@ -2844,7 +2844,10 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._priv_cam = new_cam
             if priv_changed:
                 if hasattr(self, "_privacy_badge_overlay"):
+                    r_edge = int(round((CANVAS_W + self._notch_w) / 2.0))
+                    self._privacy_badge_overlay.move(r_edge - 34, 4)
                     self._privacy_badge_overlay.set_state(new_mic, new_cam)
+                    self._privacy_badge_overlay.raise_()
                 self.update()
 
             # Active Downloads Watcher (~/Downloads, internally cached 1.0s)
@@ -3555,6 +3558,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     _EXTRAS["draw_privacy_dots"](p, self.width() / 2.0, self.height() / 2.0, self._mic, self._cam)
 
             self._privacy_badge_overlay = _PrivacyDotOverlay(self)
+            self._privacy_badge_overlay.move(int(round((CANVAS_W + self._notch_w) / 2.0)) - 34, 4)
             self._privacy_badge_overlay.raise_()
 
             # Auto-refresh dashboard every 2.5 seconds while visible
