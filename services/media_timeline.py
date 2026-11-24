@@ -124,6 +124,29 @@ class MediaTimelineTracker:
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def notify_track_changed(self) -> None:
+        """Immediately reset position for a newly started track and force-sync with Windows GSMTC."""
+        with self._lock:
+            self._pos = 0.0
+            self._duration = 0.0
+            self._updated_ts = time.time()
+            self._last_poll_ts = 0.0
+
+        def _sync_new_track() -> None:
+            # Poll once immediately, and again ~650ms later in case Spotify's GSMTC timeline lags behind title update
+            for delay in (0.15, 0.65):
+                time.sleep(delay)
+                data = query_media_timeline_sync()
+                with self._lock:
+                    if data.get("ok"):
+                        self._pos = float(data["pos"])
+                        self._duration = float(data["duration"])
+                        self._updated_ts = float(data["updated_ts"])
+                        self._playing = bool(data["playing"])
+                        self._last_poll_ts = time.time()
+
+        threading.Thread(target=_sync_new_track, daemon=True).start()
+
     def seek_async(self, target_seconds: float) -> None:
         """Seek the playing track to target_seconds via Windows GSMTC TryChangePlaybackPositionAsync."""
         target = max(0.0, float(target_seconds))

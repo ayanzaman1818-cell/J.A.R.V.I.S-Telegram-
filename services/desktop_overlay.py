@@ -2292,8 +2292,12 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             if clean_song != getattr(self, "_idle_song_title", ""):
                 self._idle_song_title = clean_song
                 self._idle_marquee_t = 0.0
+                # Song changed -> immediately reset & re-sync GSMTC timeline automatically!
+                self.service._media_timeline.notify_track_changed()
             else:
                 self._idle_marquee_t = getattr(self, "_idle_marquee_t", 0.0) + (1.0 / 30.0)
+                # Keep GSMTC timeline continuously synced in the background regardless of notch state
+                self.service._media_timeline.trigger_poll_async(force=False)
 
             # Sample live Windows WASAPI master audio peak (0.0 .. 1.0) with balanced, natural responsiveness
             raw_peak = self.service._audio_meter.get_peak()
@@ -2331,7 +2335,6 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self.update()
             elif self.state == "dashboard" and hasattr(self, "_dash_seek_bar"):
                 # Smoothly advance the live progress bar & timestamps at 30fps while Dashboard is open
-                self.service._media_timeline.trigger_poll_async(force=False)
                 self._dash_seek_bar.update()
 
         def _animate_to(self, new_state: str, duration_ms: int = 540) -> None:
@@ -2974,7 +2977,6 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._dash_clock_lbl.setText(f"{h12}:{now.minute:02d} {ampm}")
             if hasattr(self, "_vol_slider"):
                 self._vol_slider.sync_from_os()
-            self.service._media_timeline.trigger_poll_async(force=True)
             if hasattr(self, "_dash_seek_bar"):
                 self._dash_seek_bar.update()
 
