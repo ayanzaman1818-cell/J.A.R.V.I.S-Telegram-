@@ -433,9 +433,9 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
     class _SquircleMirrorWidget(QWidget):
         """Horizontally-mirrored squircle live webcam preview using native PySide6.QtMultimedia."""
 
-        def __init__(self, size: int = 128, parent: Optional[QWidget] = None) -> None:
+        def __init__(self, parent: Optional[QWidget] = None) -> None:
             super().__init__(parent)
-            self.setFixedSize(size, size)
+            self.setMinimumSize(320, 140)
             self._frame_img: Optional[QImage] = None
             self._status_msg = "Camera idle"
             self._camera: Any = None
@@ -494,26 +494,33 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
             p = QPainter(self)
             p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-            rect = QRectF(1.0, 1.0, self.width() - 2.0, self.height() - 2.0)
-            sq = make_squircle_fn(rect)
+            rect = QRectF(0.0, 0.0, float(self.width()), float(self.height()))
+            clip = QPainterPath()
+            clip.addRoundedRect(rect, 18.0, 18.0)
 
             p.save()
-            p.setClipPath(sq)
+            p.setClipPath(clip)
             if self._frame_img is not None and not self._frame_img.isNull():
-                iw, ih = self._frame_img.width(), self._frame_img.height()
-                side = min(iw, ih)
-                sx, sy = (iw - side) // 2, (ih - side) // 2
-                p.drawImage(rect, self._frame_img, QRectF(sx, sy, side, side))
+                iw = float(self._frame_img.width())
+                ih = float(self._frame_img.height())
+                target_ar = rect.width() / max(1.0, rect.height())
+                img_ar = iw / max(1.0, ih)
+                # True aspect-fill center crop so the webcam fills the full notch with zero stretching
+                if img_ar > target_ar:
+                    crop_h = ih
+                    crop_w = ih * target_ar
+                else:
+                    crop_w = iw
+                    crop_h = iw / target_ar
+                sx = (iw - crop_w) / 2.0
+                sy = (ih - crop_h) / 2.0
+                p.drawImage(rect, self._frame_img, QRectF(sx, sy, crop_w, crop_h))
             else:
-                p.fillPath(sq, QColor(255, 255, 255, 14))
+                p.fillPath(clip, QColor(255, 255, 255, 12))
                 p.setPen(QColor("#94a3b8"))
-                p.setFont(QFont("SF Pro Display", 9, QFont.Weight.DemiBold))
+                p.setFont(QFont("SF Pro Display", 11, QFont.Weight.DemiBold))
                 p.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._status_msg)
             p.restore()
-
-            p.setPen(QPen(QColor(255, 255, 255, 36), 1.0))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawPath(sq)
 
     # ------------------------------------------------------------------
     # 5. Notch Utility Hub Page (Shelf | Clipboard | Mirror | Timer)
@@ -739,27 +746,15 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
                 self._clip_list_layout.addWidget(b)
             self._clip_list_layout.addStretch(1)
 
-        # --- Tab 2: Live Squircle Webcam Mirror ---
+        # --- Tab 2: Full-Notch Live Webcam Mirror ---
         def _build_mirror_tab(self) -> QWidget:
             w = QWidget()
-            hl = QHBoxLayout(w)
-            hl.setContentsMargins(8, 4, 8, 4)
-            hl.setSpacing(16)
-            hl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            vl = QVBoxLayout(w)
+            vl.setContentsMargins(0, 0, 0, 0)
+            vl.setSpacing(0)
 
-            self._mirror = _SquircleMirrorWidget(136)
-            hl.addWidget(self._mirror)
-
-            info = QVBoxLayout()
-            info.setSpacing(6)
-            info.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-            t = QLabel("Quick Mirror")
-            t.setStyleSheet("color: #ffffff; font-size: 15px; font-weight: 800; background: transparent;")
-            s = QLabel("Live mirrored webcam peek.\nTurns off automatically when closed.")
-            s.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 600; background: transparent;")
-            info.addWidget(t)
-            info.addWidget(s)
-            hl.addLayout(info)
+            self._mirror = _SquircleMirrorWidget()
+            vl.addWidget(self._mirror, stretch=1)
             return w
 
         # --- Tab 3: Quick Pomodoro / Notch Timer Creator ---
