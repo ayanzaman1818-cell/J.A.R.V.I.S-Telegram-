@@ -66,37 +66,31 @@ try {
     if ($win) {
         $clockWinFound = $true
         $all = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
-        $hasPauseBtn = $false
         $lapEnabled = $false
-        $onStopwatchTab = $false
+        $swPauseBtn = $false
         foreach ($el in $all) {
             try {
                 $aid = [string]$el.Current.AutomationId
                 $nm = [string]$el.Current.Name
                 $ct = $el.Current.ControlType.ProgrammaticName
 
-                if ($aid -match 'Stopwatch' -or $nm -match 'Stopwatch') {
-                    $onStopwatchTab = $true
-                }
+                # ONLY Stopwatch-exclusive controls (NEVER match the sidebar nav item 'Stopwatch'!)
                 if ($ct -eq 'ControlType.Button') {
-                    if ($nm -match 'Pause' -and ($aid -match 'Stopwatch|PlayPause' -or $nm -match 'stopwatch|Pause$')) {
-                        $hasPauseBtn = $true
-                    }
-                    if (($nm -match '^Lap' -or $aid -match 'Lap') -and $el.Current.IsEnabled) {
+                    if (($nm -match '^Lap$' -or $aid -match 'Stopwatch.*Lap|LapButton') -and $el.Current.IsEnabled) {
                         $lapEnabled = $true
-                        $onStopwatchTab = $true
+                    }
+                    if ($aid -match 'Stopwatch.*PlayPause|Stopwatch.*Pause' -and $nm -match 'Pause') {
+                        $swPauseBtn = $true
                     }
                 }
                 if ($aid -match 'StopwatchTimer|StopwatchTime') {
                     if ($nm) { $swTime = $nm }
                 } elseif (-not $swTime -and $nm -match '(\d{1,2}:\d{2}:\d{2}\.\d{1,2}|\d{1,2}:\d{2}\.\d{1,2})') {
                     $swTime = $Matches[1]
-                } elseif (-not $swTime -and $onStopwatchTab -and $nm -match '(\d+\s*hour|\d+\s*minute|\d+\s*second)') {
-                    $swTime = $nm
                 }
             } catch {}
         }
-        if (($lapEnabled -or ($hasPauseBtn -and $onStopwatchTab)) -and $swTime) {
+        if (($lapEnabled -or $swPauseBtn) -and $swTime) {
             $swRunning = $true
         }
     }
