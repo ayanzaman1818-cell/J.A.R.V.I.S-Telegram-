@@ -125,4 +125,4 @@ To launch silently in the background on Windows login, use [start_jarvis_hidden.
 
 ---
 
-*Coded using Gemini as a partner.*
+*Coded using Google Gemini as a partner.*
