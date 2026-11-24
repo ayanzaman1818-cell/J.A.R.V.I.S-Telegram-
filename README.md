@@ -8,21 +8,28 @@ Built with Python & PySide6 — featuring solid pitch-black (`#07080b`) borderle
 
 ## Highlights
 
-### Dynamic Island Music Notch (Idle)
-- **HiDPI Squircle Album Art**: Fetches high-resolution (`500×500`–`1000×1000`) album covers and pre-renders a supersampled PIL Lanczos-filtered squircle thumbnail (`|x|^{4.6} + |y|^{4.6} = 1`).
-- **Live Song Marquee & Progress Hairline**: Displays the active song title (smooth 60fps marquee for long titles) with a sleek album-tinted live progress bar synced to Windows GSMTC.
-- **Real-Time 60fps WASAPI Visualizer**: True decibel (`-42 dB .. 0 dB`) metering driven directly by Windows `IAudioMeterInformation` — zero fake boosting, colored with the album cover's extracted palette, and works even when Spotify is minimized to the system tray.
-- **Smart Title-Bar Dodge**: Automatically tucks into a 3px micro-line when your mouse approaches browser tabs underneath, and pops open when you push your cursor to the top pixel edge.
+### Dynamic Island Idle Notch & Live Pop-Outs
+- **HiDPI Squircle Album Art**: Pulls exact lossless PNG covers directly from Windows GSMTC (Spotify / Apple Music / Chrome) and pre-renders a supersampled PIL Lanczos-filtered squircle thumbnail (`|x|^{4.6} + |y|^{4.6} = 1`).
+- **Live Song Marquee, Progress Hairline & Direct Controls**: Displays the active song title (smooth 60fps marquee) with an album-tinted progress hairline. Scroll over the idle notch to adjust volume, middle-click to play/pause, or right-click to skip.
+- **Real-Time 60fps WASAPI Visualizer**: True decibel (`-42 dB .. 0 dB`) metering driven directly by Windows `IAudioMeterInformation`, colored with the album cover's extracted palette.
+- **Live Orange Timer & Stopwatch**: Tracks both the Windows Clock app and built-in Notch Pomodoro timers with distinct 60fps rotating-hand vector icons (widens automatically alongside music).
+- **Live Volume HUD, Battery Pulse, Downloads Ring & Privacy Dots**: Pops sleek animated pills for OS volume changes, AC charging / low battery, active `Downloads` progress (with emerald checkmark flash on completion), and glowing iOS-style orange/green Mic & Camera privacy dots.
+- **Smart Title-Bar Dodge**: Automatically tucks into a 3px micro-line when your mouse approaches browser tabs underneath.
 
 ### Wide DockBar PC Dashboard (`Ctrl + /` or Click Notch)
 - **Now Playing Card**:
-  - Continuous-curvature `78×78` squircle album art with custom vector music-note fallback.
-  - Hand-drawn monochrome vector Previous / Play-Pause / Next controls.
-  - Interactive live **Windows GSMTC progress & scrub/seek bar** that auto-syncs whenever the track changes.
-  - **Auto-Hiding & 20s Magnetic Retraction**: Stays compact (`548×142`) when idle, expands (`790×146`) when audio plays, and keeps the Music Tab open for a 20-second grace window after pausing before smoothly pulling it back into the notch.
-- **Calendar & Clock**: 12-hour live clock, 7-day calendar strip (with today & weekend highlights), and upcoming Calendar / Reminder pill.
+  - Continuous-curvature `84×84` squircle album art + `26×26` 4×-supersampled music player icon below (Spotify, Apple Music/iTunes, YouTube Music, YouTube, SoundCloud).
+  - **Click Album Cover → Synced Live Lyrics (`lrclib.net`)** or right-click to focus the music player window.
+  - Hand-drawn monochrome vector Previous / Play-Pause / Next controls + interactive Windows GSMTC scrub/seek bar + 20s magnetic retraction after pausing.
+- **Calendar, Clock & Live Weather**: 12-hour live clock, 7-day calendar strip, upcoming event pill, and a hand-drawn vector live weather badge (Open-Meteo, 30-min cache).
 - **System Monitor**: Real-time CPU, RAM, and Disk usage bars with Low / Normal / High status indicators and custom vector icons.
-- **1:1 Windows Volume Slider**: Vertical volume bar bound directly to Windows CoreAudio `IAudioEndpointVolume` with a hand-drawn vector speaker glyph.
+- **1:1 Windows Volume Slider & Audio Output Switcher**: Vertical CoreAudio `IAudioEndpointVolume` slider; click the vector speaker icon to 1-click switch Windows playback devices (Headphones / Speakers / Bluetooth).
+- **4-Tab Utility Hub (Bento Grid Icon or Drag-and-Drop to Notch)**:
+  - **File Shelf**: Drag files/images into the notch to park them, drag them right back out into any app, or drop onto **Ask JARVIS** for instant AI analysis.
+  - **Clipboard History**: Tracks your last 8 copied snippets for 1-click re-copy.
+  - **Quick Webcam Mirror**: Horizontally-mirrored squircle live camera preview (`PySide6.QtMultimedia`), automatically turning off when closed.
+  - **Quick Focus / Pomodoro Timer**: Start 5m / 10m / 15m / 25m / 45m focus timers straight from the notch.
+- **Live Notification Toasts**: Smooth 5.5s Dynamic Island toast pills for reminders, timer completions, and system alerts with 1-click **Reply** and **Dismiss**.
 
 ### Borderless Quick Chat, Voice Orb & Hybrid AI
 - **Borderless Quick Chat**: Clean `#07080b` chat interface with a one-click top-bar model switcher (`LM Studio: Qwen3 8B`, `Gemma 4 26B`, `Gemini 3.5 Lite`, `Gemini 3.8`, etc.).

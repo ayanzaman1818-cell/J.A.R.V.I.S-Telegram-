@@ -57,6 +57,11 @@ async def proactive_monitor_job(context: Any) -> None:
             ram_pct = float(metrics.get("ram_pct", 0.0))
             if ram_pct >= 93.0 and now_ts - _LAST_ALERT_TS.get("ram", 0.0) >= 7200:
                 _LAST_ALERT_TS["ram"] = now_ts
+                try:
+                    from services.desktop_overlay import notify_desktop_overlay
+                    notify_desktop_overlay("High Memory Alert", f"PC RAM usage is at {ram_pct:.0f}%.", "alert")
+                except Exception:
+                    pass
                 await context.bot.send_message(
                     config.OWNER_ID,
                     f"⚠️ High Memory Alert: PC RAM usage is at {ram_pct:.0f}%.",
@@ -125,6 +130,11 @@ async def check_persistent_reminders(context: Any) -> None:
                         ]
                     ]
                 )
+                try:
+                    from services.desktop_overlay import notify_desktop_overlay
+                    notify_desktop_overlay("Reminder", raw_msg, "reminder")
+                except Exception:
+                    pass
                 await context.bot.send_message(
                     reminder["chat_id"],
                     f"Reminder: {raw_msg}",

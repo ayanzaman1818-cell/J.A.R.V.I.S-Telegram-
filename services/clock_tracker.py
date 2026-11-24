@@ -205,6 +205,36 @@ class WindowsClockTracker:
         self._updated_ts: float = 0.0
         self._last_poll_ts: float = 0.0
         self._polling: bool = False
+        # Built-in Notch Quick Timer / Pomodoro (runs seamlessly alongside Windows Clock)
+        self._local_timer_due: float = 0.0
+        self._local_timer_total: float = 60.0
+        self._local_timer_label: str = ""
+        self._local_timer_finished_event: str = ""
+
+    def start_quick_timer(self, seconds: int, label: str = "Focus Timer") -> None:
+        """Start a built-in Notch Pomodoro / Quick Timer (uses the exact same 60fps orange icon!)."""
+        sec = max(5, int(seconds))
+        with self._lock:
+            self._local_timer_total = float(sec)
+            self._local_timer_due = time.time() + float(sec)
+            self._local_timer_label = label
+            self._local_timer_finished_event = ""
+
+    def stop_quick_timer(self) -> None:
+        with self._lock:
+            self._local_timer_due = 0.0
+            self._local_timer_label = ""
+
+    def has_quick_timer(self) -> bool:
+        with self._lock:
+            return self._local_timer_due > time.time()
+
+    def pop_finished_timer_label(self) -> str:
+        """Return and clear the finished quick timer label once it reaches 00:00."""
+        with self._lock:
+            lbl = self._local_timer_finished_event
+            self._local_timer_finished_event = ""
+            return lbl
 
     def trigger_poll_async(self) -> None:
         """Non-blocking background poll every ~1.8s so active timers & stopwatches stay synced."""
@@ -253,7 +283,26 @@ class WindowsClockTracker:
 
     def current_state(self) -> tuple[bool, str, str, float, float]:
         """Return (is_active, mode, formatted_time, exact_seconds, timer_fraction_0_to_1) at 60fps."""
+        now = time.time()
         with self._lock:
+            # Check built-in Notch Quick Timer / Pomodoro first
+            local_due = self._local_timer_due
+            local_total = self._local_timer_total
+            local_lbl = self._local_timer_label
+            if local_due > 0.0:
+                if local_due <= now:
+                    self._local_timer_due = 0.0
+                    self._local_timer_finished_event = local_lbl or "Timer"
+                    local_due = 0.0
+                else:
+                    rem_l = local_due - now
+                    frac_l = max(0.0, min(1.0, rem_l / max(1.0, local_total)))
+                    tot_s = int(rem_l)
+                    h, rem = divmod(tot_s, 3600)
+                    m, s = divmod(rem, 60)
+                    fmt = f"{h}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
+                    return True, "timer", fmt, rem_l, frac_l
+
             active = self._active
             mode = self._mode
             due_ts = self._due_ts
@@ -264,7 +313,6 @@ class WindowsClockTracker:
         if not active or not mode:
             return False, "", "", 0.0, 0.0
 
-        now = time.time()
         if mode == "timer":
             remaining = (due_ts - self.TIMER_TOAST_OFFSET_SEC) - now
             if remaining <= 0.0:
