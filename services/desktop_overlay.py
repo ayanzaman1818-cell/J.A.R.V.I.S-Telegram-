@@ -1894,6 +1894,87 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 p.setBrush(QColor("#ffffff"))
                 p.drawEllipse(QPointF(thumb_x, thumb_y), 4.2, 4.2)
 
+    def _make_squircle_path(rect: QRectF, n: float = 4.6, steps: int = 72) -> QPainterPath:
+        """Build a true Apple-style continuous-curvature squircle (superellipse |x|^n + |y|^n = 1)."""
+        cx = rect.center().x()
+        cy = rect.center().y()
+        rx = rect.width() / 2.0
+        ry = rect.height() / 2.0
+        exp = 2.0 / n
+        path = QPainterPath()
+        for i in range(steps):
+            t = (2.0 * math.pi * i) / steps
+            ct = math.cos(t)
+            st = math.sin(t)
+            x = cx + rx * math.copysign(abs(ct) ** exp, ct)
+            y = cy + ry * math.copysign(abs(st) ** exp, st)
+            if i == 0:
+                path.moveTo(x, y)
+            else:
+                path.lineTo(x, y)
+        path.closeSubpath()
+        return path
+
+    class _SquircleAlbumArt(QWidget):
+        """True continuous-curvature Apple squircle album cover with SmoothPixmapTransform & custom vector fallback."""
+
+        def __init__(self, size: int = 78, parent: Optional[QWidget] = None) -> None:
+            super().__init__(parent)
+            self._size = size
+            self._pixmap: Optional[QPixmap] = None
+            self.setFixedSize(size, size)
+
+        def set_pixmap(self, pixmap: Optional[QPixmap]) -> None:
+            if pixmap is not None and not pixmap.isNull():
+                if self._pixmap is not None and self._pixmap.cacheKey() == pixmap.cacheKey():
+                    return
+                self._pixmap = pixmap
+            else:
+                if self._pixmap is None:
+                    return
+                self._pixmap = None
+            self.update()
+
+        def paintEvent(self, _event: Any) -> None:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+            rect = QRectF(0.75, 0.75, self.width() - 1.5, self.height() - 1.5)
+            squircle = _make_squircle_path(rect)
+
+            p.save()
+            p.setClipPath(squircle)
+            if self._pixmap is not None and not self._pixmap.isNull():
+                # Center-crop aspect fill into the squircle
+                pw = self._pixmap.width()
+                ph = self._pixmap.height()
+                side = min(pw, ph)
+                sx = (pw - side) // 2
+                sy = (ph - side) // 2
+                p.drawPixmap(rect, self._pixmap, QRectF(sx, sy, side, side))
+            else:
+                # Subtle dark glass fill + custom hand-drawn vector double music note
+                p.fillPath(squircle, QColor(255, 255, 255, 16))
+                cx, cy = rect.center().x(), rect.center().y()
+                p.setPen(QPen(QColor("#94a3b8"), 2.1, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                p.setBrush(QColor("#94a3b8"))
+                # Stems + top beam
+                p.drawLine(QPointF(cx - 5.5, cy + 7.5), QPointF(cx - 5.5, cy - 8.5))
+                p.drawLine(QPointF(cx + 8.5, cy + 5.0), QPointF(cx + 8.5, cy - 11.0))
+                p.drawLine(QPointF(cx - 5.5, cy - 8.5), QPointF(cx + 8.5, cy - 11.0))
+                p.drawLine(QPointF(cx - 5.5, cy - 4.5), QPointF(cx + 8.5, cy - 7.0))
+                # Note heads
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawEllipse(QPointF(cx - 9.0, cy + 8.0), 4.2, 3.1)
+                p.drawEllipse(QPointF(cx + 5.0, cy + 5.5), 4.2, 3.1)
+            p.restore()
+
+            # Crisp subtle specular rim around the squircle
+            p.setPen(QPen(QColor(255, 255, 255, 38), 1.0))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(squircle)
+
     class _DynamicNotchWindow(QWidget):
         """Fixed-canvas top-center Dynamic Island Notch window. Never shifts `x`; morphs symmetrically from center."""
 
@@ -2425,15 +2506,15 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 c1 = QColor(*palette[1 % len(palette)])
                 c2 = QColor(*palette[2 % len(palette)])
 
-                # 1. Left Side: Compact Rounded Album Cover Artwork Thumbnail inside the pure black notch
+                # 1. Left Side: Compact Squircle Album Cover Artwork Thumbnail inside the pure black notch
                 art_size = max(13.0, min(18.0, nh - 5.0))
                 art_x = left + 9.0
                 art_y = (nh - art_size) / 2.0
                 art_rect = QRectF(art_x, art_y, art_size, art_size)
 
-                art_clip = QPainterPath()
-                art_clip.addRoundedRect(art_rect, 4.2, 4.2)
+                art_clip = _make_squircle_path(art_rect)
                 p.save()
+                p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
                 p.setClipPath(art_clip)
                 if self._art_pixmap is not None and not self._art_pixmap.isNull():
                     p.drawPixmap(art_rect.toRect(), self._art_pixmap)
@@ -2447,7 +2528,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
                 p.setPen(QPen(QColor(255, 255, 255, 50), 0.7))
                 p.setBrush(Qt.BrushStyle.NoBrush)
-                p.drawRoundedRect(art_rect, 4.2, 4.2)
+                p.drawPath(art_clip)
 
                 # 2. Center: Crisp "JARVIS" label in the middle between the Album Cover and Visualizer
                 p.setPen(QColor(226, 232, 240, 215))
@@ -2556,13 +2637,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             media_wrap.setContentsMargins(0, 0, 0, 0)
             media_wrap.setSpacing(10)
 
-            self._dash_music_icon = QLabel("")
-            self._dash_music_icon.setFixedSize(78, 78)
-            self._dash_music_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._dash_music_icon.setStyleSheet(
-                "background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.14); "
-                "border-radius: 14px;"
-            )
+            self._dash_music_icon = _SquircleAlbumArt(78)
             media_wrap.addWidget(self._dash_music_icon, alignment=Qt.AlignmentFlag.AlignVCenter)
 
             m_info = QVBoxLayout()
@@ -2896,17 +2971,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._dash_media_artist.setText(elided_artist)
                 self._dash_media_artist.setToolTip(artist_part)
 
-                if self._art_pixmap is not None and not self._art_pixmap.isNull():
-                    scaled_art = self._art_pixmap.scaled(
-                        76,
-                        76,
-                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                        Qt.TransformationMode.SmoothTransformation,
-                    )
-                    self._dash_music_icon.setPixmap(scaled_art)
-                else:
-                    self._dash_music_icon.setPixmap(QPixmap())
-                    self._dash_music_icon.setText("🎧")
+                self._dash_music_icon.set_pixmap(self._art_pixmap)
 
             # System Monitor: progress bars + Words (Low / Normal / High)
             cpu_w = max(6, int(76.0 * min(1.0, float(snap.get("cpu_pct", 10.0)) / 100.0)))
