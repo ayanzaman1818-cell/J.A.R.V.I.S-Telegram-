@@ -2519,11 +2519,12 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._toast_timer.setSingleShot(True)
             self._toast_timer.timeout.connect(self._dismiss_toast_if_active)
 
-            # Poll mouse clicks outside the notch when expanded (and unpinned) so clicking anywhere outside closes it
+            # Poll mouse clicks & smart title-bar dodge at 60fps (16ms) for instant, silky responsiveness
             self._mouse_down_prev: bool = False
             self._outside_click_timer = QTimer(self)
+            self._outside_click_timer.setTimerType(Qt.TimerType.PreciseTimer)
             self._outside_click_timer.timeout.connect(self._check_outside_mouse_click)
-            self._outside_click_timer.start(45)
+            self._outside_click_timer.start(16)
 
             # Silent invisible startup warm-up: pre-polishes QSS, rasterizes SF Pro fonts, warms COM volume & layout
             # so the VERY FIRST click on the notch is immediately 60fps silky butter!
@@ -2567,29 +2568,28 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             pos = QCursor.pos()
             local = self.mapFromGlobal(pos)
             cx = CANVAS_W / 2.0
-            in_center_x = abs(local.x() - cx) <= 165.0
-            is_closing_anim = (
-                self.state == "idle"
-                and self._anim.state() == QVariantAnimation.State.Running
-            )
-            if self.state in ("idle", "hover") and not is_closing_anim:
+            dodge_half_w = max(175.0, self._notch_w / 2.0 + 28.0)
+            in_center_x = abs(local.x() - cx) <= dodge_half_w
+            # Only pause dodge while fading out from an expanded card (never block fast idle tuck/untuck!)
+            is_closing_expanded = bool(getattr(self, "_fading_out", False))
+            if self.state in ("idle", "hover") and not is_closing_expanded:
                 if in_center_x and local.y() <= 2:
                     # User deliberately pushed cursor to the very top pixel edge of the monitor -> untuck & hover/open
                     if self._tucked_dodge:
                         self._tucked_dodge = False
-                        self._animate_to("hover", duration_ms=360)
+                        self._animate_to("hover", duration_ms=380)
                     elif self.state == "idle":
                         self._animate_to("hover", duration_ms=380)
-                elif in_center_x and 3 <= local.y() <= 54:
-                    # User is hovering over a browser tab / window title bar right under the notch -> tuck up out of the way!
+                elif in_center_x and 3 <= local.y() <= 58:
+                    # User is hovering over a browser tab / window title bar right under the notch -> snappy silky tuck!
                     if not self._tucked_dodge and self.state == "idle":
                         self._tucked_dodge = True
-                        self._animate_to("idle", duration_ms=340)
+                        self._animate_to("idle", duration_ms=240)
                 else:
-                    # Cursor moved away from the top tab bar -> restore the normal idle / music notch
+                    # Cursor moved away from the top tab bar -> bouncy, silky spring back out!
                     if self._tucked_dodge:
                         self._tucked_dodge = False
-                        self._animate_to("idle", duration_ms=460)
+                        self._animate_to("idle", duration_ms=420)
 
             if not just_clicked:
                 return
@@ -3063,8 +3063,17 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._anim.stop()
             if new_state == "hover":
                 curve = QEasingCurve(QEasingCurve.Type.OutBack)
-                curve.setOvershoot(1.95)
-                eff_dur = 440
+                curve.setOvershoot(2.05)
+                eff_dur = 400
+            elif key == "tucked":
+                # Instant, silky tuck out of the way when hovering browser tabs
+                curve = QEasingCurve(QEasingCurve.Type.OutQuart)
+                eff_dur = 230
+            elif new_state == "idle" and not was_expanded:
+                # Bouncy, velvety spring pop when untucking or morphing between idle states (music/clock/hud)
+                curve = QEasingCurve(QEasingCurve.Type.OutBack)
+                curve.setOvershoot(2.15)
+                eff_dur = 430
             elif new_state == "idle":
                 curve = QEasingCurve(QEasingCurve.Type.InOutQuart)
                 eff_dur = 580
