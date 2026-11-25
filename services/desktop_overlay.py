@@ -2664,7 +2664,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             if hasattr(self, "_privacy_badge_overlay"):
                 r_edge = int(round((CANVAS_W + self._notch_w) / 2.0))
                 dot_y = 6 if self._notch_h > 40 else max(2, int(round((self._notch_h - 14.0) / 2.0)))
-                self._privacy_badge_overlay.move(r_edge - 30, dot_y)
+                self._privacy_badge_overlay.move(r_edge - 26, dot_y)
                 self._privacy_badge_overlay.raise_()
             self.update()
 
@@ -2847,10 +2847,13 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 if hasattr(self, "_privacy_badge_overlay"):
                     r_edge = int(round((CANVAS_W + self._notch_w) / 2.0))
                     dot_y = 6 if self._notch_h > 40 else max(2, int(round((self._notch_h - 14.0) / 2.0)))
-                    self._privacy_badge_overlay.move(r_edge - 30, dot_y)
+                    self._privacy_badge_overlay.move(r_edge - 26, dot_y)
                     self._privacy_badge_overlay.set_state(new_mic, new_cam)
                     self._privacy_badge_overlay.raise_()
-                self.update()
+                if self.state in ("idle", "hover"):
+                    self._animate_to(self.state, duration_ms=400)
+                else:
+                    self.update()
 
             # Active Downloads Watcher (~/Downloads, internally cached 1.0s)
             dl = self.service._downloads_watcher.get_status()
@@ -3002,6 +3005,10 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             else:
                 key = new_state
             tw, th = self.SIZES.get(key, self.SIZES["idle"])
+            if key in ("idle_music", "idle_clock", "idle_music_clock", "hover_music", "hover_clock", "hover_music_clock") and (
+                getattr(self, "_priv_mic", False) or getattr(self, "_priv_cam", False)
+            ):
+                tw += 20
             self._target_w = float(tw)
             self._target_h = float(th)
 
@@ -3323,7 +3330,9 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawPath(art_clip)
 
-                # 3. Right Side geometry (if Timer/Stopwatch is active, reserve an orange clock zone on the far right!)
+                # 3. Right Side geometry (reserve clean 20px slot on far right if Mic/Cam privacy dot is active!)
+                priv_slot = 20.0 if (getattr(self, "_priv_mic", False) or getattr(self, "_priv_cam", False)) else 0.0
+                eff_right = right - priv_slot
                 clock_active = bool(getattr(self, "_clock_active", False)) and bool(getattr(self, "_clock_fmt", ""))
                 clock_zone_w = 78.0 if clock_active else 0.0
                 bars = self._vis_bars
@@ -3331,7 +3340,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 gap = 2.1
                 vis_total_w = len(bars) * bar_w + (len(bars) - 1) * gap
                 vis_right_pad = 10.0
-                vis_start_x = right - clock_zone_w - vis_right_pad - vis_total_w
+                vis_start_x = eff_right - clock_zone_w - vis_right_pad - vis_total_w
 
                 # 2. Center: Live Track Title (smooth marquee for long titles) + Live Album-Tinted Progress Hairline
                 center_left = art_x + art_size + 8.0
@@ -3412,7 +3421,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
                 # 4. Optional Far-Right Orange Windows Clock Timer / Stopwatch Zone (when BOTH music & clock are active)
                 if clock_active:
-                    div_x = right - clock_zone_w - 2.0
+                    div_x = eff_right - clock_zone_w - 2.0
                     p.setPen(QPen(QColor(255, 159, 10, 72), 1.0))
                     p.drawLine(QPointF(div_x, 5.0), QPointF(div_x, nh - 5.0))
 
@@ -3431,7 +3440,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     p.setPen(QColor("#ff9f0a"))
                     c_txt = getattr(self, "_clock_fmt", "")
                     p.drawText(
-                        QRectF(icon_cx + 8.5, 0.0, right - (icon_cx + 8.5) - 9.0, nh),
+                        QRectF(icon_cx + 8.5, 0.0, eff_right - (icon_cx + 8.5) - 9.0, nh),
                         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                         c_txt,
                     )
