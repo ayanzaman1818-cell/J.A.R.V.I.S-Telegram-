@@ -3059,21 +3059,21 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._fade_anim.setEndValue(1.0)
                 self._fade_anim.start()
 
-            # Silky, properly-paced OutBack spring curves (smooth launch -> tasteful visible bounce -> velvety settle)
+            # Silky, unhurried OutBack spring curves (smooth launch -> tasteful visible bounce -> velvety settle)
             self._anim.stop()
             if new_state == "hover":
                 curve = QEasingCurve(QEasingCurve.Type.OutBack)
-                curve.setOvershoot(2.05)
-                eff_dur = 400
+                curve.setOvershoot(2.0)
+                eff_dur = 500
             elif key == "tucked":
-                # Instant, silky tuck out of the way when hovering browser tabs
-                curve = QEasingCurve(QEasingCurve.Type.OutQuart)
-                eff_dur = 230
+                # Silky, unhurried glide out of the way when hovering browser tabs
+                curve = QEasingCurve(QEasingCurve.Type.InOutCubic)
+                eff_dur = 460
             elif new_state == "idle" and not was_expanded:
-                # Bouncy, velvety spring pop when untucking or morphing between idle states (music/clock/hud)
+                # Silky, bouncy spring pop when untucking or morphing between idle states (music/clock/hud)
                 curve = QEasingCurve(QEasingCurve.Type.OutBack)
-                curve.setOvershoot(2.15)
-                eff_dur = 430
+                curve.setOvershoot(2.1)
+                eff_dur = 580
             elif new_state == "idle":
                 curve = QEasingCurve(QEasingCurve.Type.InOutQuart)
                 eff_dur = 580
