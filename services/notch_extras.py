@@ -86,7 +86,7 @@ class _GUID(ctypes.Structure):
         return cls(u.time_low, u.time_mid, u.time_hi_version, (ctypes.c_ubyte * 8)(*u.bytes[8:]))
 
 
-class _SERVICE_STATUS(ctypes.Structure):
+class _SERVICE_STATUS_PROCESS(ctypes.Structure):
     _fields_ = [
         ("dwServiceType", wt.DWORD),
         ("dwCurrentState", wt.DWORD),
@@ -95,6 +95,8 @@ class _SERVICE_STATUS(ctypes.Structure):
         ("dwServiceSpecificExitCode", wt.DWORD),
         ("dwCheckPoint", wt.DWORD),
         ("dwWaitHint", wt.DWORD),
+        ("dwProcessId", wt.DWORD),
+        ("dwServiceFlags", wt.DWORD),
     ]
 
 
@@ -180,38 +182,78 @@ def _is_coreaudio_mic_active() -> bool:
         return False
 
 
-def _is_frameserver_webcam_active() -> bool:
-    """Hardware-level (<0.1ms) Win32 SCM query on Windows Camera FrameServer service (SERVICE_RUNNING == 4)."""
+def _get_frameserver_state_and_pid() -> tuple[bool, int]:
+    """Hardware-level (<0.1ms) Win32 SCM query returning (is_running, pid) for Windows Camera FrameServer."""
     if os.name != "nt":
-        return False
+        return False, 0
     try:
         adv = ctypes.windll.advapi32
         adv.OpenSCManagerW.argtypes = [wt.LPCWSTR, wt.LPCWSTR, wt.DWORD]
         adv.OpenSCManagerW.restype = wt.HANDLE
         adv.OpenServiceW.argtypes = [wt.HANDLE, wt.LPCWSTR, wt.DWORD]
         adv.OpenServiceW.restype = wt.HANDLE
-        adv.QueryServiceStatus.argtypes = [wt.HANDLE, ctypes.POINTER(_SERVICE_STATUS)]
-        adv.QueryServiceStatus.restype = wt.BOOL
+        adv.QueryServiceStatusEx.argtypes = [
+            wt.HANDLE, wt.DWORD, ctypes.c_void_p, wt.DWORD, ctypes.POINTER(wt.DWORD),
+        ]
+        adv.QueryServiceStatusEx.restype = wt.BOOL
         adv.CloseServiceHandle.argtypes = [wt.HANDLE]
         adv.CloseServiceHandle.restype = wt.BOOL
         scm = adv.OpenSCManagerW(None, None, 0x0001)  # SC_MANAGER_CONNECT
         if not scm:
-            return False
+            return False, 0
         try:
             svc = adv.OpenServiceW(scm, "FrameServer", 0x0004)  # SERVICE_QUERY_STATUS
             if not svc:
-                return False
+                return False, 0
             try:
-                ss = _SERVICE_STATUS()
-                if adv.QueryServiceStatus(svc, ctypes.byref(ss)):
-                    return int(ss.dwCurrentState) == 4  # SERVICE_RUNNING
+                ssp = _SERVICE_STATUS_PROCESS()
+                needed = wt.DWORD(0)
+                if adv.QueryServiceStatusEx(svc, 0, ctypes.byref(ssp), ctypes.sizeof(ssp), ctypes.byref(needed)):
+                    return int(ssp.dwCurrentState) == 4, int(ssp.dwProcessId)
             finally:
                 adv.CloseServiceHandle(svc)
         finally:
             adv.CloseServiceHandle(scm)
     except Exception:
         pass
-    return False
+    return False, 0
+
+
+def _get_process_cpu_ticks_nt(target_pid: int) -> int:
+    """Read KernelTime + UserTime (100ns ticks) for ANY PID (including LocalService) via NtQuerySystemInformation (<0.4ms)."""
+    if os.name != "nt" or target_pid <= 0:
+        return -1
+    try:
+        import struct
+
+        ntdll = ctypes.windll.ntdll
+        buf_size = 512 * 1024
+        for _ in range(4):
+            buf = ctypes.create_string_buffer(buf_size)
+            ret_len = ctypes.c_ulong(0)
+            st = ntdll.NtQuerySystemInformation(5, buf, buf_size, ctypes.byref(ret_len))
+            if st == 0:
+                raw = buf.raw
+                off = 0
+                while True:
+                    next_off = struct.unpack_from("<I", raw, off)[0]
+                    pid = struct.unpack_from("<Q", raw, off + 80)[0]
+                    if pid == target_pid:
+                        kt, ut = struct.unpack_from("<qq", raw, off + 40)
+                        return int(kt + ut)
+                    if next_off == 0:
+                        break
+                    off += next_off
+                return -1
+            buf_size = max(buf_size * 2, ret_len.value + 65536)
+    except Exception:
+        pass
+    return -1
+
+
+def _is_frameserver_webcam_active() -> bool:
+    running, _pid = _get_frameserver_state_and_pid()
+    return running
 
 
 def _scan_consent_store(device_name: str) -> tuple[bool, str]:
@@ -272,10 +314,13 @@ def _scan_consent_store(device_name: str) -> tuple[bool, str]:
 
 
 class PrivacyIndicatorTracker:
-    """Polls hardware CoreAudio capture sessions + Win32 FrameServer + ConsentStore every 0.6s (<1ms)."""
+    """Instant (<0.25s) hardware CoreAudio mic + FrameServer live-stream CPU-delta webcam tracker."""
 
     def __init__(self) -> None:
         self._last_ts: float = 0.0
+        self._fs_prev_pid: int = 0
+        self._fs_prev_ticks: int = -1
+        self._fs_idle_strikes: int = 0
         self._state: dict[str, Any] = {
             "mic_active": False,
             "cam_active": False,
@@ -285,12 +330,37 @@ class PrivacyIndicatorTracker:
 
     def get_status(self) -> dict[str, Any]:
         now = time.time()
-        if now - self._last_ts >= 0.6:
+        if now - self._last_ts >= 0.25:
             self._last_ts = now
             mic_cs, mic_app = _scan_consent_store("microphone")
             cam_cs, cam_app = _scan_consent_store("webcam")
             mic_hw = _is_coreaudio_mic_active()
-            cam_hw = _is_frameserver_webcam_active()
+
+            # Check if FrameServer is running AND actively streaming frames (turns off in ~0.5s when camera closes!)
+            fs_running, fs_pid = _get_frameserver_state_and_pid()
+            cam_hw = False
+            if fs_running and fs_pid > 0:
+                ticks = _get_process_cpu_ticks_nt(fs_pid)
+                if fs_pid != self._fs_prev_pid or self._fs_prev_ticks < 0:
+                    # Brand-new FrameServer process just spawned -> camera just turned on!
+                    self._fs_prev_pid = fs_pid
+                    self._fs_prev_ticks = ticks
+                    self._fs_idle_strikes = 0
+                    cam_hw = True
+                elif ticks > self._fs_prev_ticks:
+                    # FrameServer actively burning CPU copying live video frames!
+                    self._fs_prev_ticks = ticks
+                    self._fs_idle_strikes = 0
+                    cam_hw = True
+                else:
+                    # FrameServer is idle/lingering after camera closed -> turn off indicator after 2 idle ticks (~0.5s)!
+                    self._fs_idle_strikes += 1
+                    cam_hw = self._fs_idle_strikes < 2
+            else:
+                self._fs_prev_pid = 0
+                self._fs_prev_ticks = -1
+                self._fs_idle_strikes = 0
+
             self._state = {
                 "mic_active": bool(mic_hw or mic_cs),
                 "cam_active": bool(cam_hw or cam_cs),
