@@ -641,13 +641,12 @@ class SyncedLyricsTracker:
                 if item:
                     synced_raw = str(item.get("syncedLyrics") or "").strip()
                     plain_raw = str(item.get("plainLyrics") or "").strip()
-                    synced_lines: list[tuple[float, str]] = []
+                    synced_lines: list[tuple[float, str, list[tuple[float, str]]]] = []
                     lrc_offset_sec = 0.0
                     if synced_raw:
                         m_off = self._LRC_OFFSET_RE.search(synced_raw)
                         if m_off:
                             try:
-                                # Standard LRC [offset:+ms] shifts lyrics earlier by ms/1000
                                 lrc_offset_sec = int(m_off.group(1)) / 1000.0
                             except ValueError:
                                 lrc_offset_sec = 0.0
@@ -655,9 +654,19 @@ class SyncedLyricsTracker:
                             m = self._LRC_LINE_RE.match(ln.strip())
                             if m:
                                 ts = max(0.0, int(m.group(1)) * 60.0 + float(m.group(2)) - lrc_offset_sec)
-                                # Strip any inline <mm:ss.xx> tags cleanly for display
-                                txt = self._LRC_WORD_TAG_RE.sub("", m.group(3)).strip()
-                                synced_lines.append((ts, txt))
+                                raw_body = m.group(3)
+                                # Parse TRUE enhanced-LRC word timestamps (<mm:ss.xx> word) when present!
+                                word_timings: list[tuple[float, str]] = []
+                                tag_matches = list(self._LRC_WORD_TAG_RE.finditer(raw_body))
+                                if tag_matches:
+                                    for k, tm in enumerate(tag_matches):
+                                        wts = max(0.0, int(tm.group(1)) * 60.0 + float(tm.group(2)) - lrc_offset_sec)
+                                        seg_end = tag_matches[k + 1].start() if k + 1 < len(tag_matches) else len(raw_body)
+                                        w_txt = raw_body[tm.end():seg_end].strip()
+                                        if w_txt:
+                                            word_timings.append((wts, w_txt))
+                                txt = self._LRC_WORD_TAG_RE.sub("", raw_body).strip()
+                                synced_lines.append((ts, txt, word_timings))
                         synced_lines.sort(key=lambda x: x[0])
                     if synced_lines:
                         result = {"status": "synced", "synced": synced_lines, "plain": []}
@@ -687,29 +696,32 @@ class SyncedLyricsTracker:
 
         status = entry["status"]
         if status == "synced":
-            lines: list[tuple[float, str]] = entry["synced"]
-            # +0.55s lead-in compensates for Spotify Desktop Windows GSMTC latency so each line hits right on the beat!
-            eff_pos = pos_sec + offset_sec + 0.55
+            lines = entry["synced"]
+            # Exact Spotify GSMTC clock (zero artificial drift; user can still nudge +/-0.25s if an LRC upload is offset)
+            eff_pos = pos_sec + offset_sec
             idx = -1
-            for i, (ts, _txt) in enumerate(lines):
-                if ts <= eff_pos:
+            for i, row in enumerate(lines):
+                if row[0] <= eff_pos:
                     idx = i
                 else:
                     break
             if 0 <= idx < len(lines):
-                cur_ts, cur = lines[idx]
-                if idx + 1 < len(lines):
-                    nxt_ts, nxt = lines[idx + 1]
-                    raw_span = max(0.5, nxt_ts - cur_ts)
-                    # Natural sung duration (~78% of line gap, capped at 5.0s for instrumental pauses)
-                    vocal_span = min(raw_span * 0.78, 5.0)
-                else:
-                    nxt = ""
-                    vocal_span = 3.2
-                prog = max(0.0, min(1.0, (eff_pos - cur_ts) / max(0.35, vocal_span)))
-                return "synced", cur or "♪  •  ♪", nxt, prog
+                cur_ts, cur, word_timings = lines[idx]
+                nxt = lines[idx + 1][1] if (idx + 1 < len(lines)) else ""
+                if word_timings:
+                    # TRUE per-word enhanced LRC timestamps -> exact word-by-word progress!
+                    w_idx = 0
+                    for wi, (wts, _wt) in enumerate(word_timings):
+                        if wts <= eff_pos:
+                            w_idx = wi
+                        else:
+                            break
+                    prog = (w_idx + 1.0) / max(1.0, float(len(word_timings)))
+                    return "synced", cur or "♪  •  ♪", nxt, prog
+                # Line-only LRC -> return 1.0 so the whole active line glows cleanly in exact sync with Spotify (no fake word drift!)
+                return "synced", cur or "♪  •  ♪", nxt, 1.0
             first = lines[0][1] if lines else ""
-            return "synced", "♪  •  ♪", first, 0.0
+            return "synced", "♪  •  ♪", first, 1.0
         if status == "plain":
             pl: list[str] = entry["plain"]
             return "plain", pl[0] if pl else "", pl[1] if len(pl) > 1 else "", 1.0
