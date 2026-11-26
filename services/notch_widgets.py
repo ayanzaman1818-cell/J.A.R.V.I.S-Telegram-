@@ -880,7 +880,7 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
             else:
                 self._smooth_energy = self._smooth_energy * 0.82 + self._audio_energy * 0.18
             if self._slide_t < 1.0:
-                u = min(1.0, (now - self._slide_start_ts) / 0.34)
+                u = min(1.0, (now - self._slide_start_ts) / 0.24)
                 # Smooth OutCubic slide-up easing
                 self._slide_t = 1.0 - (1.0 - u) ** 3
             self.update()

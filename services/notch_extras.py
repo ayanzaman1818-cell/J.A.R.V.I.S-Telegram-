@@ -688,10 +688,11 @@ class SyncedLyricsTracker:
         status = entry["status"]
         if status == "synced":
             lines: list[tuple[float, str]] = entry["synced"]
-            eff_pos = pos_sec + offset_sec
+            # +0.55s lead-in compensates for Spotify Desktop Windows GSMTC latency so each line hits right on the beat!
+            eff_pos = pos_sec + offset_sec + 0.55
             idx = -1
             for i, (ts, _txt) in enumerate(lines):
-                if ts <= eff_pos + 0.06:
+                if ts <= eff_pos:
                     idx = i
                 else:
                     break
