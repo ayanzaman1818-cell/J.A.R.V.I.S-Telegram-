@@ -820,10 +820,11 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
     # ------------------------------------------------------------------
 
     class NotchLyricsPage(QWidget):
-        """Sleek synced lyrics view (lrclib.net) + Focus Player button."""
+        """Sleek synced lyrics view (lrclib.net) + Focus Player + built-in playback controls."""
 
         go_home = Signal()
         focus_player = Signal()
+        media_action = Signal(str)
 
         def __init__(self, parent: Optional[QWidget] = None) -> None:
             super().__init__(parent)
@@ -871,6 +872,23 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
             self._next_line.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._next_line.setStyleSheet("color: #64748b; font-size: 12px; font-weight: 600; background: transparent;")
             root.addWidget(self._next_line)
+
+            # Compact built-in Prev / Play-Pause / Next bar right inside the Lyrics card
+            ctrl_row = QHBoxLayout()
+            ctrl_row.setSpacing(8)
+            ctrl_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            for act, txt in (("prev_track", "Prev"), ("play_pause", "Play / Pause"), ("next_track", "Next")):
+                mb = QPushButton(txt)
+                mb.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+                mb.setFixedHeight(24)
+                mb.setStyleSheet(
+                    "QPushButton { background: rgba(255,255,255,0.08); color: #e2e8f0; border: none; "
+                    "border-radius: 11px; padding: 0 12px; font-size: 10.5px; font-weight: 700; }"
+                    "QPushButton:hover { background: rgba(255,255,255,0.18); color: #ffffff; }"
+                )
+                mb.clicked.connect(lambda _c=False, a=act: self.media_action.emit(a))
+                ctrl_row.addWidget(mb)
+            root.addLayout(ctrl_row)
 
         def set_lyrics(self, header: str, active_line: str, next_line: str) -> None:
             self._track_lbl.setText(header)

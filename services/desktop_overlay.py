@@ -1902,6 +1902,13 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 p.drawRoundedRect(QRectF(cx + 3.8, cy - 4.6, 2.0, 9.2), 1.0, 1.0)
                 tri = QPolygonF([QPointF(cx - 4.8, cy - 4.8), QPointF(cx - 4.8, cy + 4.8), QPointF(cx + 3.2, cy)])
                 p.drawPolygon(tri)
+            elif self.kind == "lyrics":
+                # Hand-drawn minimalist 3-line synced-lyrics vector icon
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(fg, 1.55, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(cx - 5.2, cy - 3.6), QPointF(cx + 5.2, cy - 3.6))
+                p.drawLine(QPointF(cx - 5.2, cy + 0.0), QPointF(cx + 3.2, cy + 0.0))
+                p.drawLine(QPointF(cx - 5.2, cy + 3.6), QPointF(cx + 1.2, cy + 3.6))
             else:
                 if self.is_playing:
                     p.drawRoundedRect(QRectF(cx - 4.2, cy - 5.0, 2.8, 10.0), 1.2, 1.2)
@@ -1990,6 +1997,11 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
         def mousePressEvent(self, event: Any) -> None:
             if event.button() == Qt.MouseButton.LeftButton:
+                # Clicking the right timestamp toggles between Total Duration (3:11) and Time Remaining (-2:53)
+                if float(event.position().y()) <= 12.0 and float(event.position().x()) >= float(self.width()) * 0.55:
+                    self._show_remaining = not getattr(self, "_show_remaining", False)
+                    self.update()
+                    return
                 _pos, dur, _playing = self._tracker.current_position()
                 if dur > 0:
                     self._dragging = True
@@ -2036,7 +2048,10 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             tf = QFont("SF Pro Display", 7, QFont.Weight.DemiBold)
             p.setFont(tf)
             left_txt = self._fmt_mmss(shown_pos) if dur > 0 else "0:00"
-            right_txt = self._fmt_mmss(dur) if dur > 0 else "0:00"
+            if dur > 0 and getattr(self, "_show_remaining", False):
+                right_txt = "-" + self._fmt_mmss(max(0.0, dur - shown_pos))
+            else:
+                right_txt = self._fmt_mmss(dur) if dur > 0 else "0:00"
             p.drawText(QRectF(2, 0, w / 2.0 - 2, 11), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, left_txt)
             p.drawText(QRectF(w / 2.0, 0, w / 2.0 - 4, 11), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, right_txt)
 
@@ -2092,9 +2107,20 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             super().__init__(parent)
             self._size = size
             self._pixmap: Optional[QPixmap] = None
+            self._hovered: bool = False
             self.setFixedSize(size, size)
             self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             self.setToolTip("Click for Synced Live Lyrics · Right-click to Focus Music Player")
+
+        def enterEvent(self, event: Any) -> None:
+            self._hovered = True
+            self.update()
+            super().enterEvent(event)
+
+        def leaveEvent(self, event: Any) -> None:
+            self._hovered = False
+            self.update()
+            super().leaveEvent(event)
 
         def mousePressEvent(self, event: Any) -> None:
             if event.button() == Qt.MouseButton.LeftButton:
@@ -2151,30 +2177,67 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 p.drawEllipse(QPointF(cx + 5.0, cy + 5.5), 4.2, 3.1)
             p.restore()
 
+            # Subtle hover "Lyrics" pill over the bottom of the squircle so live lyrics are 100% discoverable!
+            if self._hovered:
+                p.save()
+                p.setClipPath(squircle)
+                bar_h = 22.0
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(7, 8, 11, 188))
+                p.drawRect(QRectF(0.0, self.height() - bar_h, float(self.width()), bar_h))
+                p.setPen(QColor("#ffffff"))
+                p.setFont(QFont("SF Pro Display", 8, QFont.Weight.Bold))
+                p.drawText(
+                    QRectF(0.0, self.height() - bar_h, float(self.width()), bar_h),
+                    Qt.AlignmentFlag.AlignCenter,
+                    "Lyrics",
+                )
+                p.restore()
+
             # Crisp subtle specular rim around the squircle
-            p.setPen(QPen(QColor(255, 255, 255, 38), 1.0))
+            p.setPen(QPen(QColor(255, 255, 255, 58 if self._hovered else 38), 1.0))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawPath(squircle)
 
     class _MusicSourceBadge(QWidget):
-        """Hand-drawn custom vector music player icon badge (Spotify, Apple Music, YouTube Music, YouTube, SoundCloud)."""
+        """Clickable 4x-supersampled custom vector music player icon badge (click to focus Spotify / Apple Music)."""
+
+        clicked = Signal()
 
         _TOOLTIPS = {
-            "spotify": "Playing from Spotify",
-            "apple_music": "Playing from Apple Music / iTunes",
-            "youtube_music": "Playing from YouTube Music",
-            "youtube": "Playing from YouTube",
-            "soundcloud": "Playing from SoundCloud",
-            "generic": "Playing Media",
+            "spotify": "Click to open Spotify",
+            "apple_music": "Click to open Apple Music / iTunes",
+            "youtube_music": "Click to open YouTube Music",
+            "youtube": "Click to open YouTube",
+            "soundcloud": "Click to open SoundCloud",
+            "generic": "Click to focus Media Player",
         }
 
         def __init__(self, size: int = 22, parent: Optional[QWidget] = None) -> None:
             super().__init__(parent)
             self._source = "spotify"
+            self._hovered = False
             self._cached_src: str = ""
             self._cached_pm: Optional[QPixmap] = None
             self.setFixedSize(size, size)
+            self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             self.setToolTip(self._TOOLTIPS["spotify"])
+
+        def enterEvent(self, event: Any) -> None:
+            self._hovered = True
+            self.update()
+            super().enterEvent(event)
+
+        def leaveEvent(self, event: Any) -> None:
+            self._hovered = False
+            self.update()
+            super().leaveEvent(event)
+
+        def mousePressEvent(self, event: Any) -> None:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self.clicked.emit()
+                return
+            super().mousePressEvent(event)
 
         def set_source(self, source_app: str) -> None:
             src = (source_app or "generic").strip().lower()
@@ -2311,6 +2374,10 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             p = QPainter(self)
             p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            if self._hovered:
+                p.translate(self.width() / 2.0, self.height() / 2.0)
+                p.scale(1.08, 1.08)
+                p.translate(-self.width() / 2.0, -self.height() / 2.0)
             p.drawPixmap(
                 QRectF(0.0, 0.0, float(self.width()), float(self.height())),
                 self._cached_pm,
@@ -2410,12 +2477,12 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             "idle_music_clock": (316, 24), # Wider horizontal music strip + orange Timer/Stopwatch on the right!
             "hover": (176, 20),            # Slightly larger hovered pill with status dot + JARVIS text
             "hover_clock": (172, 25),      # Hovered Timer/Stopwatch pill
-            "hover_music": (248, 25),      # Hovered horizontal music strip
-            "hover_music_clock": (338, 25),# Hovered wider music + Timer/Stopwatch strip
+            "hover_music": (268, 26),      # Hovered horizontal music strip with 1-click Prev / Play-Pause / Next controls
+            "hover_music_clock": (350, 26),# Hovered wider music + Timer/Stopwatch strip
             "dashboard": (582, 142),       # Compact horizontal Dashboard when NO audio is playing
             "dashboard_music": (830, 146), # Wide horizontal Dashboard WITH Media Player when audio is playing!
             "tools": (608, 244),           # Utility Hub: Drag-and-Drop File Shelf, Clipboard History, Live Mirror, Quick Timer
-            "lyrics": (548, 178),          # Synced Live Lyrics card (lrclib.net) + Focus Player
+            "lyrics": (568, 212),          # Synced Live Lyrics card (lrclib.net) + built-in playback controls
             "toast": (412, 76),            # Live Notification Toast pill (Telegram / Reminders / Timer)
             "suggestions": (488, 516),     # Connections hub card
             "chat": (556, 336),            # JARVIS Quick Chat card
@@ -3189,10 +3256,31 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._animate_to("idle", duration_ms=460)
             super().leaveEvent(event)
 
+        def mouseMoveEvent(self, event: Any) -> None:
+            if self.state == "hover" and getattr(self, "_music_playing_active", False):
+                pt = event.position()
+                hit = ""
+                for act, rect in getattr(self, "_hover_media_rects", {}).items():
+                    if rect.contains(pt):
+                        hit = act
+                        break
+                if hit != getattr(self, "_hover_media_hit", ""):
+                    self._hover_media_hit = hit
+                    self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor if hit else Qt.CursorShape.ArrowCursor))
+                    self.update()
+            super().mouseMoveEvent(event)
+
         def mousePressEvent(self, event: Any) -> None:
             if self.state in ("idle", "hover"):
                 if event.button() == Qt.MouseButton.LeftButton:
-                    # Open directly to the PC Home Dashboard
+                    # In hover_music, clicking any of the 3 mini vector controls controls playback directly!
+                    if self.state == "hover" and getattr(self, "_music_playing_active", False):
+                        pt = event.position()
+                        for act, rect in getattr(self, "_hover_media_rects", {}).items():
+                            if rect.contains(pt):
+                                self._on_dash_media_control(act)
+                                return
+                    # Clicking anywhere else on the pill opens the full PC Home Dashboard
                     self._animate_to("dashboard", duration_ms=560)
                     return
                 if event.button() == Qt.MouseButton.MiddleButton:
@@ -3351,45 +3439,84 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 vis_right_pad = 10.0
                 vis_start_x = eff_right - clock_zone_w - vis_right_pad - vis_total_w
 
-                # 2. Center: Live Track Title (smooth marquee for long titles) + Live Album-Tinted Progress Hairline
+                # 2. Center: On HOVER reveal crisp 1-click Prev / Play-Pause / Next mini controls;
+                #            On IDLE show Live Marquee Song Title + Album-Tinted Progress Hairline!
                 center_left = art_x + art_size + 8.0
                 center_right = vis_start_x - 8.0
                 center_w = max(20.0, center_right - center_left)
 
-                song_text = getattr(self, "_idle_song_title", "") or "Now Playing"
                 pos_s, dur_s, _tl_playing = self.service._media_timeline.current_position()
                 prog_ratio = max(0.0, min(1.0, pos_s / dur_s)) if dur_s > 0 else 0.0
 
-                title_font = QFont("SF Pro Display", 8, QFont.Weight.DemiBold)
-                p.setFont(title_font)
-                from PySide6.QtGui import QFontMetricsF
-                fm = QFontMetricsF(title_font)
-                text_w = fm.horizontalAdvance(song_text)
+                if self.state == "hover" and center_w >= 68.0:
+                    # Interactive 1-click hover mini media controls (Prev | Play/Pause | Next)
+                    mid_x = center_left + center_w / 2.0
+                    mid_y = (nh - 3.5) / 2.0
+                    btn_w, btn_h = 22.0, 17.0
+                    step = 26.0
+                    rects = {
+                        "prev_track": QRectF(mid_x - step - btn_w / 2.0, mid_y - btn_h / 2.0, btn_w, btn_h),
+                        "play_pause": QRectF(mid_x - btn_w / 2.0, mid_y - btn_h / 2.0, btn_w, btn_h),
+                        "next_track": QRectF(mid_x + step - btn_w / 2.0, mid_y - btn_h / 2.0, btn_w, btn_h),
+                    }
+                    self._hover_media_rects = rects
+                    hit_act = getattr(self, "_hover_media_hit", "")
+                    is_pl = bool(getattr(self, "_dash_play_btn", None) and self._dash_play_btn.is_playing)
 
-                title_rect = QRectF(center_left, 1.5, center_w, nh - 6.5)
-                p.save()
-                p.setClipRect(title_rect)
-                p.setPen(QColor(241, 245, 249, 238))
-                if text_w <= center_w:
-                    p.drawText(title_rect, Qt.AlignmentFlag.AlignCenter, song_text)
+                    for act, r in rects.items():
+                        rcx, rcy = r.center().x(), r.center().y()
+                        if act == hit_act:
+                            p.setPen(Qt.PenStyle.NoPen)
+                            p.setBrush(QColor(255, 255, 255, 42))
+                            p.drawRoundedRect(r, 6.0, 6.0)
+                        fg = QColor("#ffffff") if act == hit_act else QColor("#cbd5e1")
+                        p.setPen(Qt.PenStyle.NoPen)
+                        p.setBrush(fg)
+                        if act == "prev_track":
+                            p.drawRoundedRect(QRectF(rcx - 4.6, rcy - 3.6, 1.6, 7.2), 0.8, 0.8)
+                            p.drawPolygon(QPolygonF([QPointF(rcx + 3.8, rcy - 3.8), QPointF(rcx + 3.8, rcy + 3.8), QPointF(rcx - 2.4, rcy)]))
+                        elif act == "next_track":
+                            p.drawRoundedRect(QRectF(rcx + 3.0, rcy - 3.6, 1.6, 7.2), 0.8, 0.8)
+                            p.drawPolygon(QPolygonF([QPointF(rcx - 3.8, rcy - 3.8), QPointF(rcx - 3.8, rcy + 3.8), QPointF(rcx + 2.4, rcy)]))
+                        else:
+                            if is_pl:
+                                p.drawRoundedRect(QRectF(rcx - 3.3, rcy - 4.0, 2.2, 8.0), 1.0, 1.0)
+                                p.drawRoundedRect(QRectF(rcx + 1.1, rcy - 4.0, 2.2, 8.0), 1.0, 1.0)
+                            else:
+                                p.drawPolygon(QPolygonF([QPointF(rcx - 2.8, rcy - 4.2), QPointF(rcx - 2.8, rcy + 4.2), QPointF(rcx + 4.2, rcy)]))
                 else:
-                    # Smooth continuous marquee: 2.0s pause at start, glide at 24px/s, 1.2s pause at end, loop seamlessly
-                    scroll_dist = text_w - center_w + 6.0
-                    speed = 24.0
-                    scroll_dur = scroll_dist / speed
-                    pause_start = 2.0
-                    pause_end = 1.2
-                    cycle = pause_start + scroll_dur + pause_end
-                    t_mod = getattr(self, "_idle_marquee_t", 0.0) % cycle
-                    if t_mod < pause_start:
-                        offset = 0.0
-                    elif t_mod < pause_start + scroll_dur:
-                        offset = (t_mod - pause_start) * speed
+                    self._hover_media_rects = {}
+                    song_text = getattr(self, "_idle_song_title", "") or "Now Playing"
+                    title_font = QFont("SF Pro Display", 8, QFont.Weight.DemiBold)
+                    p.setFont(title_font)
+                    from PySide6.QtGui import QFontMetricsF
+                    fm = QFontMetricsF(title_font)
+                    text_w = fm.horizontalAdvance(song_text)
+
+                    title_rect = QRectF(center_left, 1.5, center_w, nh - 6.5)
+                    p.save()
+                    p.setClipRect(title_rect)
+                    p.setPen(QColor(241, 245, 249, 238))
+                    if text_w <= center_w:
+                        p.drawText(title_rect, Qt.AlignmentFlag.AlignCenter, song_text)
                     else:
-                        offset = scroll_dist
-                    draw_r = QRectF(center_left - offset, title_rect.y(), text_w + 10.0, title_rect.height())
-                    p.drawText(draw_r, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, song_text)
-                p.restore()
+                        # Smooth continuous marquee: 2.0s pause at start, glide at 24px/s, 1.2s pause at end, loop seamlessly
+                        scroll_dist = text_w - center_w + 6.0
+                        speed = 24.0
+                        scroll_dur = scroll_dist / speed
+                        pause_start = 2.0
+                        pause_end = 1.2
+                        cycle = pause_start + scroll_dur + pause_end
+                        t_mod = getattr(self, "_idle_marquee_t", 0.0) % cycle
+                        if t_mod < pause_start:
+                            offset = 0.0
+                        elif t_mod < pause_start + scroll_dur:
+                            offset = (t_mod - pause_start) * speed
+                        else:
+                            offset = scroll_dist
+                        draw_r = QRectF(center_left - offset, title_rect.y(), text_w + 10.0, title_rect.height())
+                        p.drawText(draw_r, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, song_text)
+                    p.restore()
 
                 # Sleek 1.8px live album-tinted track progress hairline directly below the title
                 bar_y = nh - 4.0
@@ -3521,10 +3648,11 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._tools_page.stop_quick_timer.connect(self._on_stop_quick_timer)
             self._stack.addWidget(self._tools_page)
 
-            # Page 5: Synced Live Lyrics View (lrclib.net) + Focus Player
+            # Page 5: Synced Live Lyrics View (lrclib.net) + Focus Player + Built-in Playback Controls
             self._lyrics_page = _EXTRAS["NotchLyricsPage"]()
             self._lyrics_page.go_home.connect(lambda: self._animate_to("dashboard", duration_ms=480))
             self._lyrics_page.focus_player.connect(self._focus_active_media_player)
+            self._lyrics_page.media_action.connect(self._on_dash_media_control)
             self._stack.addWidget(self._lyrics_page)
 
             # Page 6: Live Notification Toast Pill (Telegram / Reminders / Timer Complete)
@@ -3709,6 +3837,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._dash_music_icon.clicked.connect(self._open_lyrics_view)
             self._dash_music_icon.right_clicked.connect(self._focus_active_media_player)
             self._dash_source_badge = _MusicSourceBadge(26)
+            self._dash_source_badge.clicked.connect(self._focus_active_media_player)
             art_col.addWidget(self._dash_music_icon, alignment=Qt.AlignmentFlag.AlignHCenter)
             art_col.addWidget(self._dash_source_badge, alignment=Qt.AlignmentFlag.AlignHCenter)
             media_wrap.addLayout(art_col)
@@ -3732,16 +3861,20 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             m_info.addSpacing(4)
 
             ctrl_row = QHBoxLayout()
-            ctrl_row.setSpacing(6)
+            ctrl_row.setSpacing(5)
             btn_prev = _CustomMediaButton("prev", "Previous Track")
             btn_prev.clicked.connect(lambda: self._on_dash_media_control("prev_track"))
             self._dash_play_btn = _CustomMediaButton("play_pause", "Play / Pause")
             self._dash_play_btn.clicked.connect(lambda: self._on_dash_media_control("play_pause"))
             btn_next = _CustomMediaButton("next", "Next Track")
             btn_next.clicked.connect(lambda: self._on_dash_media_control("next_track"))
+            btn_lyrics = _CustomMediaButton("lyrics", "Synced Live Lyrics")
+            btn_lyrics.setFixedSize(26, 26)
+            btn_lyrics.clicked.connect(self._open_lyrics_view)
             ctrl_row.addWidget(btn_prev)
             ctrl_row.addWidget(self._dash_play_btn)
             ctrl_row.addWidget(btn_next)
+            ctrl_row.addWidget(btn_lyrics)
             ctrl_row.addStretch(1)
             m_info.addLayout(ctrl_row)
 
