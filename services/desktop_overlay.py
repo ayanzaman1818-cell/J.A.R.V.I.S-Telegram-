@@ -2955,8 +2955,11 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 _st, cur_ln, nxt_ln, line_prog = self.service._lyrics_tracker.get_lines_at(
                     l_art, l_song, pos_l, duration_sec=dur_l, offset_sec=off_l
                 )
+                # Feed live 60fps WASAPI decibel energy for real-time vocal inflection glow & float!
+                pk_l = max(0.0, min(1.0, float(self.service._audio_meter.get_peak())))
+                inflect_e = max(0.0, min(1.0, (20.0 * math.log10(pk_l) + 42.0) / 42.0)) if pk_l > 1e-4 else 0.0
                 hdr_l = f"{l_song} · {l_art}" if l_art else (l_song or "Live Lyrics")
-                self._lyrics_page.set_lyrics(hdr_l[:40], cur_ln, nxt_ln, line_prog)
+                self._lyrics_page.set_lyrics(hdr_l[:40], cur_ln, nxt_ln, line_prog, audio_energy=inflect_e)
 
             # Sync Play/Pause vector glyph in Dashboard (respecting instant 0ms optimistic click override)
             if hasattr(self, "_dash_play_btn"):

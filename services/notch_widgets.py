@@ -829,10 +829,38 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
             self._cur_line: str = "♪"
             self._next_line: str = ""
             self._progress: float = 0.0
+            self._audio_energy: float = 0.35
+            self._smooth_energy: float = 0.35
             self._slide_t: float = 1.0  # 0.0 -> 1.0 smooth OutCubic slide-up transition on line change
             self._slide_start_ts: float = 0.0
 
-        def update_lyrics(self, active_line: str, next_line: str, progress: float) -> None:
+        @staticmethod
+        def _phonetic_word_weights(words: list[str]) -> list[float]:
+            """Estimate natural sung duration per word using syllable count, vowel sustain, punctuation pauses, and phrase-end hold."""
+            import re as _re
+
+            weights: list[float] = []
+            n = len(words)
+            for idx, raw_w in enumerate(words):
+                low = raw_w.lower()
+                # 1. Syllable count via vowel clusters
+                syls = max(1, len(_re.findall(r"[aeiouy]+", low)))
+                w_dur = float(syls) * 1.15 + min(4, len(low)) * 0.14
+                # 2. Elongated vowels ("ooh", "yeah", "aaah") get extra vocal sustain
+                if _re.search(r"([aeiou])\1", low) or low.rstrip(".,!?") in ("oh", "ooh", "yeah", "whoa", "hey", "la", "na"):
+                    w_dur += 0.95
+                # 3. Natural breath pauses on punctuation
+                if raw_w.endswith((",", ";")):
+                    w_dur += 0.55
+                elif raw_w.endswith(("...", "—", "-", "!", "?")):
+                    w_dur += 0.85
+                # 4. Phrase-final word is typically held/inflected slightly longer
+                if idx == n - 1 and n > 1:
+                    w_dur += 0.65
+                weights.append(max(0.9, w_dur))
+            return weights
+
+        def update_lyrics(self, active_line: str, next_line: str, progress: float, audio_energy: float = 0.35) -> None:
             import time as _time
 
             line = active_line or "♪"
@@ -845,6 +873,12 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
                 self._slide_t = 0.0
             self._next_line = nxt
             self._progress = max(0.0, min(1.0, float(progress)))
+            self._audio_energy = max(0.0, min(1.0, float(audio_energy)))
+            # Smooth vocal inflection envelope (fast attack on swells, silky decay)
+            if self._audio_energy > self._smooth_energy:
+                self._smooth_energy = self._smooth_energy * 0.55 + self._audio_energy * 0.45
+            else:
+                self._smooth_energy = self._smooth_energy * 0.82 + self._audio_energy * 0.18
             if self._slide_t < 1.0:
                 u = min(1.0, (now - self._slide_start_ts) / 0.34)
                 # Smooth OutCubic slide-up easing
@@ -895,8 +929,8 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
                     rows[-1].append((i, wd, ww))
                     cur_w += add_w
 
-                # Compute continuous word progress windows weighted by spoken word length
-                weights = [max(2.0, float(len(wd)) + 1.0) for wd in words]
+                # Compute phonetic syllable + vowel-sustain + punctuation-pause word windows
+                weights = self._phonetic_word_weights(words)
                 total_w = sum(weights)
                 word_bounds: list[tuple[float, float]] = []
                 acc = 0.0
@@ -906,8 +940,9 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
                     s1 = acc / total_w
                     word_bounds.append((s0, s1))
 
-                row_h = 25.0
-                block_top = (34.0 if len(rows) == 1 else 20.0) + slide_dy
+                row_h = 26.0
+                block_top = (34.0 if len(rows) == 1 else 19.0) + slide_dy
+                inflect = self._smooth_energy  # 0.0 (whisper) .. 1.0 (vocal swell / chorus belt)
 
                 for r_idx, row_words in enumerate(rows):
                     rw = sum(x[2] for x in row_words) + space_w * max(0, len(row_words) - 1)
@@ -916,21 +951,33 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
                     for w_idx, wd, ww in row_words:
                         s0, s1 = word_bounds[w_idx]
                         span = max(0.01, s1 - s0)
-                        # Smooth 0..1 fill for this specific word
-                        wf = max(0.0, min(1.0, (self._progress - s0) / span))
-                        # Subtle silky upward float (-1.8px) while this word is actively being sung
-                        lift = -1.8 * math.sin(wf * math.pi) if 0.0 < wf < 1.0 else (-0.8 if wf >= 1.0 else 0.0)
+                        # Smooth 0..1 fill for this specific word (gentle S-curve for natural vocal attack)
+                        raw_wf = max(0.0, min(1.0, (self._progress - s0) / span))
+                        wf = raw_wf * raw_wf * (3.0 - 2.0 * raw_wf)
+                        # Vocal-inflection-reactive float lift (-1.4px on quiet words -> -3.8px on loud vocal swells!)
+                        is_active = 0.0 < wf < 1.0
+                        lift = -(1.4 + 2.4 * inflect) * math.sin(wf * math.pi) if is_active else (-0.8 if wf >= 1.0 else 0.0)
+
+                        # Soft luminous inflection halo behind the active word when the singer swells
+                        if is_active and inflect > 0.25:
+                            glow_a = int(round(min(72.0, (inflect - 0.20) * 85.0 * math.sin(wf * math.pi) * base_alpha)))
+                            if glow_a > 2:
+                                p.setPen(Qt.PenStyle.NoPen)
+                                p.setBrush(QColor(125, 211, 252, glow_a))
+                                p.drawRoundedRect(QRectF(x - 3.0, y + lift + 2.0, ww + 6.0, row_h - 4.0), 7.0, 7.0)
 
                         # Base muted upcoming word
-                        p.setPen(QColor(255, 255, 255, int(round(78 * base_alpha))))
+                        p.setPen(QColor(255, 255, 255, int(round(76 * base_alpha))))
                         p.drawText(QRectF(x, y + lift, ww + 2.0, row_h), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, wd)
 
-                        # Progressive glowing white sweep across the word at 60fps!
+                        # Progressive glowing sweep across the word at 60fps synced to syllable cadence!
                         if wf > 0.0:
                             p.save()
-                            p.setClipRect(QRectF(x - 1.0, y + lift - 2.0, (ww + 2.0) * wf + 1.0, row_h + 4.0))
-                            if wf < 0.99:
-                                p.setPen(QColor(186, 230, 253, int(round(255 * base_alpha))))
+                            p.setClipRect(QRectF(x - 1.0, y + lift - 3.0, (ww + 2.0) * wf + 1.0, row_h + 6.0))
+                            if is_active:
+                                # Shift subtly brighter/warmer on higher vocal inflection
+                                b_tint = int(round(255 - 35 * (1.0 - inflect)))
+                                p.setPen(QColor(b_tint, 245, 255, int(round(255 * base_alpha))))
                             else:
                                 p.setPen(QColor(255, 255, 255, int(round(255 * base_alpha))))
                             p.drawText(QRectF(x, y + lift, ww + 2.0, row_h), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, wd)
@@ -1026,13 +1073,20 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
         def _nudge_offset(self, delta: float) -> None:
             self.sync_offset_sec = max(-5.0, min(5.0, self.sync_offset_sec + delta))
 
-        def set_lyrics(self, header: str, active_line: str, next_line: str, progress: float = 1.0) -> None:
+        def set_lyrics(
+            self,
+            header: str,
+            active_line: str,
+            next_line: str,
+            progress: float = 1.0,
+            audio_energy: float = 0.35,
+        ) -> None:
             if abs(self.sync_offset_sec) >= 0.05:
                 sign = "+" if self.sync_offset_sec > 0 else ""
                 self._track_lbl.setText(f"{header} ({sign}{self.sync_offset_sec:.2f}s)")
             else:
                 self._track_lbl.setText(header)
-            self._canvas.update_lyrics(active_line, next_line, progress)
+            self._canvas.update_lyrics(active_line, next_line, progress, audio_energy=audio_energy)
 
     # ------------------------------------------------------------------
     # 7. Live Notification Toast Pill Page (Telegram / Reminder / Timer)
