@@ -3707,6 +3707,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._animate_to("tools", duration_ms=520)
 
         def _open_lyrics_view(self) -> None:
+            # Force-sync exact Spotify playback position immediately so lyrics start dead-on with the vocals!
+            self.service._media_timeline.trigger_poll_async(force=True)
             media = self.service.get_cached_now_playing()
             raw_t = str(media.get("track") or "").strip()
             if " - " in raw_t:

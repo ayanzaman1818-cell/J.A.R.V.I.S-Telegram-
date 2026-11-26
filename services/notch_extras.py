@@ -550,6 +550,8 @@ class SyncedLyricsTracker:
     """Fetches timestamped LRC lyrics from lrclib.net and returns the active line for any song position."""
 
     _LRC_LINE_RE = re.compile(r"\[(\d+):(\d+(?:\.\d+)?)\]\s*(.*)")
+    _LRC_OFFSET_RE = re.compile(r"\[offset:\s*([+-]?\d+)\]", re.IGNORECASE)
+    _LRC_WORD_TAG_RE = re.compile(r"<(\d+):(\d+(?:\.\d+)?)>")
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -640,12 +642,21 @@ class SyncedLyricsTracker:
                     synced_raw = str(item.get("syncedLyrics") or "").strip()
                     plain_raw = str(item.get("plainLyrics") or "").strip()
                     synced_lines: list[tuple[float, str]] = []
+                    lrc_offset_sec = 0.0
                     if synced_raw:
+                        m_off = self._LRC_OFFSET_RE.search(synced_raw)
+                        if m_off:
+                            try:
+                                # Standard LRC [offset:+ms] shifts lyrics earlier by ms/1000
+                                lrc_offset_sec = int(m_off.group(1)) / 1000.0
+                            except ValueError:
+                                lrc_offset_sec = 0.0
                         for ln in synced_raw.splitlines():
                             m = self._LRC_LINE_RE.match(ln.strip())
                             if m:
-                                ts = int(m.group(1)) * 60.0 + float(m.group(2))
-                                txt = m.group(3).strip()
+                                ts = max(0.0, int(m.group(1)) * 60.0 + float(m.group(2)) - lrc_offset_sec)
+                                # Strip any inline <mm:ss.xx> tags cleanly for display
+                                txt = self._LRC_WORD_TAG_RE.sub("", m.group(3)).strip()
                                 synced_lines.append((ts, txt))
                         synced_lines.sort(key=lambda x: x[0])
                     if synced_lines:
@@ -689,12 +700,12 @@ class SyncedLyricsTracker:
                 if idx + 1 < len(lines):
                     nxt_ts, nxt = lines[idx + 1]
                     raw_span = max(0.5, nxt_ts - cur_ts)
-                    # Singers typically finish the line in ~78% of the gap before the next line (capped for long pauses)
-                    vocal_span = min(raw_span * 0.80, max(1.4, len(cur) * 0.085))
+                    # Follow the song's REAL tempo (90% of the actual gap to the next line, only capping huge >7.5s instrumental breaks)
+                    vocal_span = min(raw_span * 0.90, 7.5)
                 else:
                     nxt = ""
-                    vocal_span = max(1.6, len(cur) * 0.085)
-                prog = max(0.0, min(1.0, (eff_pos - cur_ts) / max(0.4, vocal_span)))
+                    vocal_span = 4.0
+                prog = max(0.0, min(1.0, (eff_pos - cur_ts) / max(0.35, vocal_span)))
                 return "synced", cur or "♪  •  ♪", nxt, prog
             first = lines[0][1] if lines else ""
             return "synced", "♪  •  ♪", first, 0.0
