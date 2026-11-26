@@ -2632,6 +2632,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             # (4 <= y <= 56 around the center) to click or see a tab underneath, automatically tuck the notch up into a
             # 3px micro-line so the tab underneath is 100% visible & clickable!
             # Pushing the cursor all the way to the very top edge of the monitor (y <= 2) untucks & opens the notch.
+            if getattr(self, "_fullscreen_hidden", False):
+                return
             pos = QCursor.pos()
             local = self.mapFromGlobal(pos)
             cx = CANVAS_W / 2.0
@@ -2868,8 +2870,32 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             if clock_active != prev_clock_active:
                 self._clock_active = clock_active
 
-            # Live Idle Extras: OS Volume HUD, Battery Charging/Low, Mic/Cam Privacy, Active Downloads
+            # Fullscreen Guard: completely hide the notch during fullscreen videos, games, or F11 apps
             now_t = time.time()
+            if now_t - getattr(self, "_fs_check_ts", 0.0) >= 0.35:
+                self._fs_check_ts = now_t
+                try:
+                    from services.notch_extras import is_primary_monitor_fullscreen
+                    is_fs = is_primary_monitor_fullscreen(exclude_hwnd=int(self.winId()))
+                except Exception:
+                    is_fs = False
+                was_fs = bool(getattr(self, "_fullscreen_hidden", False))
+                if is_fs and not was_fs:
+                    self._fullscreen_hidden = True
+                    if self.state in self.EXPANDED_STATES and hasattr(self, "_tools_page"):
+                        self._tools_page.on_hidden()
+                    self.state = "idle"
+                    self._content_root.hide()
+                    self.hide()
+                    return
+                if (not is_fs) and was_fs:
+                    self._fullscreen_hidden = False
+                    self.show()
+                    self._animate_to("idle", duration_ms=420)
+            if getattr(self, "_fullscreen_hidden", False):
+                return
+
+            # Live Idle Extras: OS Volume HUD, Battery Charging/Low, Mic/Cam Privacy, Active Downloads
             try:
                 cur_vol, cur_muted = self.service._audio_meter.get_master_volume()
                 if abs(cur_vol - self._last_os_vol) > 0.012 or cur_muted != self._last_os_muted:
@@ -3843,7 +3869,9 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._animate_to("idle", duration_ms=440)
 
         def _on_notification_toast(self, title: str, body: str, source: str = "JARVIS") -> None:
-            """Pop open a sleek 5.5s Dynamic Island notification toast when idle."""
+            """Pop open a sleek 5.5s Dynamic Island notification toast when idle (suppressed in fullscreen)."""
+            if getattr(self, "_fullscreen_hidden", False):
+                return
             if self.state not in ("idle", "hover", "toast"):
                 return
             self._toast_page.set_toast(title, body, source)

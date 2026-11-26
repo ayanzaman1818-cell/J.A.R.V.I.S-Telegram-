@@ -891,6 +891,90 @@ def set_default_audio_output_sync(device_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# 8. Fullscreen App / Game / Video Detector (Win32 — < 0.1ms)
+# ---------------------------------------------------------------------------
+
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wt.DWORD),
+        ("rcMonitor", wt.RECT),
+        ("rcWork", wt.RECT),
+        ("dwFlags", wt.DWORD),
+    ]
+
+
+def is_primary_monitor_fullscreen(exclude_hwnd: int = 0) -> bool:
+    """Return True if a fullscreen video (YouTube/VLC/F11), presentation, or game covers the primary monitor."""
+    if os.name != "nt":
+        return False
+    try:
+        u32 = ctypes.windll.user32
+        sh32 = ctypes.windll.shell32
+
+        # Declare 64-bit-safe Win32 signatures so HWND/HMONITOR handles are never truncated
+        u32.GetForegroundWindow.argtypes = []
+        u32.GetForegroundWindow.restype = wt.HWND
+        u32.IsWindowVisible.argtypes = [wt.HWND]
+        u32.IsWindowVisible.restype = wt.BOOL
+        u32.IsIconic.argtypes = [wt.HWND]
+        u32.IsIconic.restype = wt.BOOL
+        u32.GetClassNameW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
+        u32.GetClassNameW.restype = ctypes.c_int
+        u32.GetWindowRect.argtypes = [wt.HWND, ctypes.POINTER(wt.RECT)]
+        u32.GetWindowRect.restype = wt.BOOL
+        u32.MonitorFromWindow.argtypes = [wt.HWND, wt.DWORD]
+        u32.MonitorFromWindow.restype = wt.HMONITOR
+        u32.GetMonitorInfoW.argtypes = [wt.HMONITOR, ctypes.POINTER(_MONITORINFO)]
+        u32.GetMonitorInfoW.restype = wt.BOOL
+
+        # 1. Check Windows Shell notification state (catches D3D fullscreen games & presentation mode)
+        state = ctypes.c_int(0)
+        if sh32.SHQueryUserNotificationState(ctypes.byref(state)) == 0:
+            # 2=QUNS_BUSY (fullscreen app), 3=QUNS_RUNNING_D3D_FULL_SCREEN, 4=QUNS_PRESENTATION_MODE
+            if state.value in (2, 3, 4):
+                return True
+
+        # 2. Check foreground window rect against primary monitor full bounds (catches YouTube/Chrome F11/borderless games)
+        fg = u32.GetForegroundWindow()
+        if not fg or fg == exclude_hwnd:
+            return False
+        if not u32.IsWindowVisible(fg) or u32.IsIconic(fg):
+            return False
+
+        cls_buf = ctypes.create_unicode_buffer(128)
+        u32.GetClassNameW(fg, cls_buf, 128)
+        if cls_buf.value in ("Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "NotifyIconOverflowWindow"):
+            return False
+
+        wr = wt.RECT()
+        if not u32.GetWindowRect(fg, ctypes.byref(wr)):
+            return False
+
+        mon = u32.MonitorFromWindow(fg, 2)  # MONITOR_DEFAULTTONEAREST
+        if not mon:
+            return False
+        mi = _MONITORINFO()
+        mi.cbSize = ctypes.sizeof(_MONITORINFO)
+        if not u32.GetMonitorInfoW(mon, ctypes.byref(mi)):
+            return False
+
+        # Only hide the notch if the fullscreen window is on the primary monitor (where the notch lives)
+        if not (mi.dwFlags & 1):  # MONITORINFOF_PRIMARY == 1
+            return False
+
+        mr = mi.rcMonitor
+        # Allow 1px tolerance for borderless fullscreen apps
+        return (
+            wr.left <= mr.left + 1
+            and wr.top <= mr.top + 1
+            and wr.right >= mr.right - 1
+            and wr.bottom >= mr.bottom - 1
+        )
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # 7. Display Brightness Reader (WMI laptop displays — non-blocking)
 # ---------------------------------------------------------------------------
 
