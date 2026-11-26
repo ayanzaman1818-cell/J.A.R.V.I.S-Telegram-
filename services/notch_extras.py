@@ -927,11 +927,12 @@ def is_primary_monitor_fullscreen(exclude_hwnd: int = 0) -> bool:
         u32.GetMonitorInfoW.argtypes = [wt.HMONITOR, ctypes.POINTER(_MONITORINFO)]
         u32.GetMonitorInfoW.restype = wt.BOOL
 
-        # 1. Check Windows Shell notification state (catches D3D fullscreen games & presentation mode)
+        # 1. Check Windows Shell notification state (catches exclusive D3D fullscreen games & presentation mode)
+        # Note: Do NOT include QUNS_BUSY (2) — Windows 11 returns QUNS_BUSY during Focus Assist / DND even on normal desktop.
         state = ctypes.c_int(0)
         if sh32.SHQueryUserNotificationState(ctypes.byref(state)) == 0:
-            # 2=QUNS_BUSY (fullscreen app), 3=QUNS_RUNNING_D3D_FULL_SCREEN, 4=QUNS_PRESENTATION_MODE
-            if state.value in (2, 3, 4):
+            # 3=QUNS_RUNNING_D3D_FULL_SCREEN, 4=QUNS_PRESENTATION_MODE
+            if state.value in (3, 4):
                 return True
 
         # 2. Check foreground window rect against primary monitor full bounds (catches YouTube/Chrome F11/borderless games)
