@@ -2950,10 +2950,13 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     l_art, l_song = (x.strip() for x in raw_t_l.split(" - ", 1))
                 else:
                     l_art, l_song = "", raw_t_l
-                pos_l, _dur_l, _pl_l = self.service._media_timeline.current_position()
-                _st, cur_ln, nxt_ln, line_prog = self.service._lyrics_tracker.get_lines_at(l_art, l_song, pos_l)
+                pos_l, dur_l, _pl_l = self.service._media_timeline.current_position()
+                off_l = float(getattr(self._lyrics_page, "sync_offset_sec", 0.0))
+                _st, cur_ln, nxt_ln, line_prog = self.service._lyrics_tracker.get_lines_at(
+                    l_art, l_song, pos_l, duration_sec=dur_l, offset_sec=off_l
+                )
                 hdr_l = f"{l_song} · {l_art}" if l_art else (l_song or "Live Lyrics")
-                self._lyrics_page.set_lyrics(hdr_l[:44], cur_ln, nxt_ln, line_prog)
+                self._lyrics_page.set_lyrics(hdr_l[:40], cur_ln, nxt_ln, line_prog)
 
             # Sync Play/Pause vector glyph in Dashboard (respecting instant 0ms optimistic click override)
             if hasattr(self, "_dash_play_btn"):
@@ -3707,8 +3710,9 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 art, song = (x.strip() for x in raw_t.split(" - ", 1))
             else:
                 art, song = "", raw_t
+            _pos, dur, _pl = self.service._media_timeline.current_position()
             if song:
-                self.service._lyrics_tracker.request_track(art, song)
+                self.service._lyrics_tracker.request_track(art, song, duration_sec=dur)
             self._animate_to("lyrics", duration_ms=480)
 
         def _focus_active_media_player(self) -> None:

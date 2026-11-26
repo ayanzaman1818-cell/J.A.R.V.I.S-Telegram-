@@ -556,14 +556,18 @@ class SyncedLyricsTracker:
         self._cache: dict[str, dict[str, Any]] = {}
         self._fetching_key: str = ""
 
-    def request_track(self, artist: str, title: str) -> None:
+    def request_track(self, artist: str, title: str, duration_sec: float = 0.0) -> None:
         key = f"{artist.strip().lower()}||{title.strip().lower()}"
         if not title.strip() or key in self._cache or self._fetching_key == key:
             return
         self._fetching_key = key
-        threading.Thread(target=self._fetch_worker, args=(key, artist.strip(), title.strip()), daemon=True).start()
+        threading.Thread(
+            target=self._fetch_worker,
+            args=(key, artist.strip(), title.strip(), float(duration_sec)),
+            daemon=True,
+        ).start()
 
-    def _fetch_worker(self, key: str, artist: str, title: str) -> None:
+    def _fetch_worker(self, key: str, artist: str, title: str, duration_sec: float = 0.0) -> None:
         result: dict[str, Any] = {"status": "none", "synced": [], "plain": []}
         try:
             import httpx
@@ -572,6 +576,8 @@ class SyncedLyricsTracker:
             clean_title = re.sub(r"\s*[\(\[].*?[\)\]]", "", title).strip() or title
             with httpx.Client(timeout=5.0, headers={"User-Agent": "JARVIS-Notch/2.7"}) as client:
                 url = f"https://lrclib.net/api/get?artist_name={quote(artist)}&track_name={quote(clean_title)}"
+                if duration_sec > 10.0:
+                    url += f"&duration={int(round(duration_sec))}"
                 r = client.get(url)
                 item = r.json() if r.status_code == 200 else None
                 if not item or not (item.get("syncedLyrics") or item.get("plainLyrics")):
@@ -580,8 +586,13 @@ class SyncedLyricsTracker:
                     if r2.status_code == 200:
                         arr = r2.json() or []
                         if arr:
-                            # Prefer a result with syncedLyrics
-                            item = next((x for x in arr if x.get("syncedLyrics")), arr[0])
+                            # Prefer syncedLyrics whose duration is closest to the playing Spotify track!
+                            synced_candidates = [x for x in arr if x.get("syncedLyrics")]
+                            if synced_candidates and duration_sec > 10.0:
+                                synced_candidates.sort(
+                                    key=lambda x: abs(float(x.get("duration") or 0.0) - duration_sec)
+                                )
+                            item = synced_candidates[0] if synced_candidates else arr[0]
 
                 if item:
                     synced_raw = str(item.get("syncedLyrics") or "").strip()
@@ -608,23 +619,26 @@ class SyncedLyricsTracker:
                 if self._fetching_key == key:
                     self._fetching_key = ""
 
-    def get_lines_at(self, artist: str, title: str, pos_sec: float) -> tuple[str, str, str, float]:
-        """Return (status ['loading'|'synced'|'plain'|'none'], active_line, next_line, line_progress_0_to_1)."""
+    def get_lines_at(
+        self, artist: str, title: str, pos_sec: float, duration_sec: float = 0.0, offset_sec: float = 0.0
+    ) -> tuple[str, str, str, float]:
+        """Return (status ['loading'|'synced'|'plain'|'none'], active_line, next_line, word_progress_0_to_1)."""
         key = f"{artist.strip().lower()}||{title.strip().lower()}"
         with self._lock:
             entry = self._cache.get(key)
             fetching = self._fetching_key == key
         if entry is None:
             if not fetching:
-                self.request_track(artist, title)
+                self.request_track(artist, title, duration_sec=duration_sec)
             return "loading", "Searching synced lyrics…", "", 0.0
 
         status = entry["status"]
         if status == "synced":
             lines: list[tuple[float, str]] = entry["synced"]
+            eff_pos = pos_sec + offset_sec
             idx = -1
             for i, (ts, _txt) in enumerate(lines):
-                if ts <= pos_sec + 0.12:
+                if ts <= eff_pos + 0.06:
                     idx = i
                 else:
                     break
@@ -632,12 +646,13 @@ class SyncedLyricsTracker:
                 cur_ts, cur = lines[idx]
                 if idx + 1 < len(lines):
                     nxt_ts, nxt = lines[idx + 1]
-                    span = max(0.6, min(10.0, nxt_ts - cur_ts))
+                    raw_span = max(0.5, nxt_ts - cur_ts)
+                    # Singers typically finish the line in ~78% of the gap before the next line (capped for long pauses)
+                    vocal_span = min(raw_span * 0.80, max(1.4, len(cur) * 0.085))
                 else:
                     nxt = ""
-                    span = 4.0
-                # Slight lead-in (0.12s) so the active word lights up right on the vocal attack
-                prog = max(0.0, min(1.0, (pos_sec - cur_ts + 0.12) / span))
+                    vocal_span = max(1.6, len(cur) * 0.085)
+                prog = max(0.0, min(1.0, (eff_pos - cur_ts) / max(0.4, vocal_span)))
                 return "synced", cur or "♪  •  ♪", nxt, prog
             first = lines[0][1] if lines else ""
             return "synced", "♪  •  ♪", first, 0.0

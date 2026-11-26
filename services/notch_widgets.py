@@ -819,8 +819,135 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
     # 6. Synced Live Lyrics Card Page (Click Album Cover)
     # ------------------------------------------------------------------
 
+    class _KaraokeLyricsCanvas(QWidget):
+        """60fps Apple Music-style word-by-word animated karaoke lyrics canvas with smooth slide-up transitions."""
+
+        def __init__(self, parent: Optional[QWidget] = None) -> None:
+            super().__init__(parent)
+            self.setMinimumHeight(98)
+            self._prev_line: str = ""
+            self._cur_line: str = "♪"
+            self._next_line: str = ""
+            self._progress: float = 0.0
+            self._slide_t: float = 1.0  # 0.0 -> 1.0 smooth OutCubic slide-up transition on line change
+            self._slide_start_ts: float = 0.0
+
+        def update_lyrics(self, active_line: str, next_line: str, progress: float) -> None:
+            import time as _time
+
+            line = active_line or "♪"
+            nxt = next_line or ""
+            now = _time.perf_counter()
+            if line != self._cur_line:
+                self._prev_line = self._cur_line
+                self._cur_line = line
+                self._slide_start_ts = now
+                self._slide_t = 0.0
+            self._next_line = nxt
+            self._progress = max(0.0, min(1.0, float(progress)))
+            if self._slide_t < 1.0:
+                u = min(1.0, (now - self._slide_start_ts) / 0.34)
+                # Smooth OutCubic slide-up easing
+                self._slide_t = 1.0 - (1.0 - u) ** 3
+            self.update()
+
+        def paintEvent(self, _event: Any) -> None:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            w, h = float(self.width()), float(self.height())
+            st = self._slide_t
+
+            # 1. Previous line smoothly sliding up & fading out during line transition
+            if self._prev_line and st < 0.99:
+                f_prev = QFont("SF Pro Display", 12, QFont.Weight.Bold)
+                p.setFont(f_prev)
+                alpha_prev = int(round(135.0 * (1.0 - st)))
+                if alpha_prev > 2:
+                    p.setPen(QColor(255, 255, 255, alpha_prev))
+                    py = 14.0 - st * 18.0
+                    p.drawText(QRectF(8.0, py, w - 16.0, 24.0), Qt.AlignmentFlag.AlignCenter, self._prev_line)
+
+            # 2. Active line: silky 60fps word-by-word progressive sweep + gentle active-word float!
+            f_cur = QFont("SF Pro Display", 15, QFont.Weight.ExtraBold)
+            p.setFont(f_cur)
+            fm = QFontMetricsF(f_cur)
+            space_w = fm.horizontalAdvance(" ")
+            words = self._cur_line.split()
+            slide_dy = (1.0 - st) * 18.0
+            base_alpha = 0.45 + 0.55 * st
+
+            if not words or self._cur_line.startswith("Searching") or self._cur_line.startswith("No synced"):
+                p.setPen(QColor(241, 245, 249, int(round(230 * base_alpha))))
+                p.drawText(QRectF(8.0, 16.0 + slide_dy, w - 16.0, 48.0), Qt.AlignmentFlag.AlignCenter, self._cur_line)
+            else:
+                # Word-wrap into 1 or 2 centered rows cleanly
+                max_row_w = w - 24.0
+                rows: list[list[tuple[int, str, float]]] = [[]]
+                cur_w = 0.0
+                for i, wd in enumerate(words):
+                    ww = fm.horizontalAdvance(wd)
+                    add_w = ww if not rows[-1] else (space_w + ww)
+                    if rows[-1] and (cur_w + add_w > max_row_w) and len(rows) < 2:
+                        rows.append([])
+                        cur_w = 0.0
+                        add_w = ww
+                    rows[-1].append((i, wd, ww))
+                    cur_w += add_w
+
+                # Compute continuous word progress windows weighted by spoken word length
+                weights = [max(2.0, float(len(wd)) + 1.0) for wd in words]
+                total_w = sum(weights)
+                word_bounds: list[tuple[float, float]] = []
+                acc = 0.0
+                for wt in weights:
+                    s0 = acc / total_w
+                    acc += wt
+                    s1 = acc / total_w
+                    word_bounds.append((s0, s1))
+
+                row_h = 25.0
+                block_top = (34.0 if len(rows) == 1 else 20.0) + slide_dy
+
+                for r_idx, row_words in enumerate(rows):
+                    rw = sum(x[2] for x in row_words) + space_w * max(0, len(row_words) - 1)
+                    x = (w - rw) / 2.0
+                    y = block_top + r_idx * row_h
+                    for w_idx, wd, ww in row_words:
+                        s0, s1 = word_bounds[w_idx]
+                        span = max(0.01, s1 - s0)
+                        # Smooth 0..1 fill for this specific word
+                        wf = max(0.0, min(1.0, (self._progress - s0) / span))
+                        # Subtle silky upward float (-1.8px) while this word is actively being sung
+                        lift = -1.8 * math.sin(wf * math.pi) if 0.0 < wf < 1.0 else (-0.8 if wf >= 1.0 else 0.0)
+
+                        # Base muted upcoming word
+                        p.setPen(QColor(255, 255, 255, int(round(78 * base_alpha))))
+                        p.drawText(QRectF(x, y + lift, ww + 2.0, row_h), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, wd)
+
+                        # Progressive glowing white sweep across the word at 60fps!
+                        if wf > 0.0:
+                            p.save()
+                            p.setClipRect(QRectF(x - 1.0, y + lift - 2.0, (ww + 2.0) * wf + 1.0, row_h + 4.0))
+                            if wf < 0.99:
+                                p.setPen(QColor(186, 230, 253, int(round(255 * base_alpha))))
+                            else:
+                                p.setPen(QColor(255, 255, 255, int(round(255 * base_alpha))))
+                            p.drawText(QRectF(x, y + lift, ww + 2.0, row_h), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, wd)
+                            p.restore()
+                        x += ww + space_w
+
+            # 3. Upcoming next line softly fading in below
+            if self._next_line:
+                f_nxt = QFont("SF Pro Display", 11, QFont.Weight.DemiBold)
+                p.setFont(f_nxt)
+                nxt_alpha = int(round(105.0 * (0.35 + 0.65 * st)))
+                p.setPen(QColor(148, 163, 184, nxt_alpha))
+                ny = h - 24.0 + (1.0 - st) * 8.0
+                p.drawText(QRectF(12.0, ny, w - 24.0, 22.0), Qt.AlignmentFlag.AlignCenter, self._next_line)
+
     class NotchLyricsPage(QWidget):
-        """Sleek synced lyrics view (lrclib.net) + Focus Player + built-in playback controls."""
+        """Sleek 60fps word-by-word karaoke synced lyrics view (lrclib.net) + sync nudge + playback controls."""
 
         go_home = Signal()
         focus_player = Signal()
@@ -828,12 +955,13 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
 
         def __init__(self, parent: Optional[QWidget] = None) -> None:
             super().__init__(parent)
+            self.sync_offset_sec: float = 0.0
             root = QVBoxLayout(self)
             root.setContentsMargins(8, 4, 8, 6)
-            root.setSpacing(6)
+            root.setSpacing(5)
 
             top = QHBoxLayout()
-            top.setSpacing(8)
+            top.setSpacing(6)
             btn_back = QPushButton("← Back")
             btn_back.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             btn_back.setFixedHeight(24)
@@ -849,6 +977,20 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
             self._track_lbl.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 700; background: transparent;")
             top.addWidget(self._track_lbl, stretch=1)
 
+            # Fine-tune sync nudge (-0.25s / +0.25s) in case a track's LRC is slightly early/late
+            for delta, txt, tip in ((-0.25, "−", "Delay lyrics by 0.25s"), (0.25, "+", "Advance lyrics by 0.25s")):
+                nb = QPushButton(txt)
+                nb.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+                nb.setFixedSize(22, 22)
+                nb.setToolTip(tip)
+                nb.setStyleSheet(
+                    "QPushButton { background: rgba(255,255,255,0.07); color: #94a3b8; border: none; "
+                    "border-radius: 11px; font-size: 12px; font-weight: 800; }"
+                    "QPushButton:hover { background: rgba(255,255,255,0.16); color: #ffffff; }"
+                )
+                nb.clicked.connect(lambda _c=False, d=delta: self._nudge_offset(d))
+                top.addWidget(nb)
+
             btn_focus = QPushButton("Open Player ↗")
             btn_focus.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             btn_focus.setFixedHeight(24)
@@ -861,19 +1003,8 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
             top.addWidget(btn_focus)
             root.addLayout(top)
 
-            self._cur_line = QLabel("♪")
-            self._cur_line.setTextFormat(Qt.TextFormat.RichText)
-            self._cur_line.setWordWrap(True)
-            self._cur_line.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._cur_line.setStyleSheet("color: #ffffff; font-size: 16px; font-weight: 800; background: transparent;")
-            root.addWidget(self._cur_line, stretch=1)
-
-            self._next_line = QLabel("")
-            self._next_line.setWordWrap(True)
-            self._next_line.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._next_line.setStyleSheet("color: #475569; font-size: 12px; font-weight: 600; background: transparent;")
-            root.addWidget(self._next_line)
-            self._last_html_key = ("", "", -1)
+            self._canvas = _KaraokeLyricsCanvas()
+            root.addWidget(self._canvas, stretch=1)
 
             # Compact built-in Prev / Play-Pause / Next bar right inside the Lyrics card
             ctrl_row = QHBoxLayout()
@@ -892,47 +1023,16 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
                 ctrl_row.addWidget(mb)
             root.addLayout(ctrl_row)
 
+        def _nudge_offset(self, delta: float) -> None:
+            self.sync_offset_sec = max(-5.0, min(5.0, self.sync_offset_sec + delta))
+
         def set_lyrics(self, header: str, active_line: str, next_line: str, progress: float = 1.0) -> None:
-            import html as _html
-
-            self._track_lbl.setText(header)
-            line = active_line or "♪"
-            words = line.split()
-            if len(words) <= 1 or progress >= 0.999 or line.startswith("Searching") or line.startswith("No synced"):
-                active_idx = len(words) - 1
+            if abs(self.sync_offset_sec) >= 0.05:
+                sign = "+" if self.sync_offset_sec > 0 else ""
+                self._track_lbl.setText(f"{header} ({sign}{self.sync_offset_sec:.2f}s)")
             else:
-                # Weight each word by its spoken character length so word-by-word highlight tracks natural vocal cadence!
-                weights = [max(2.0, float(len(w)) + 1.2) for w in words]
-                total_w = sum(weights)
-                target_w = max(0.0, min(1.0, float(progress))) * total_w
-                acc = 0.0
-                active_idx = 0
-                for i, wt in enumerate(weights):
-                    acc += wt
-                    if target_w <= acc:
-                        active_idx = i
-                        break
-                    active_idx = i
-
-            key = (line, next_line or "", active_idx)
-            if key == self._last_html_key:
-                return
-            self._last_html_key = key
-
-            if len(words) <= 1 or line.startswith("Searching") or line.startswith("No synced"):
-                self._cur_line.setText(f"<span style='color:#ffffff;'>{_html.escape(line)}</span>")
-            else:
-                spans: list[str] = []
-                for i, w in enumerate(words):
-                    ew = _html.escape(w)
-                    if i < active_idx:
-                        spans.append(f"<span style='color:#ffffff;'>{ew}</span>")
-                    elif i == active_idx:
-                        spans.append(f"<span style='color:#38bdf8;'>{ew}</span>")
-                    else:
-                        spans.append(f"<span style='color:rgba(255,255,255,0.34);'>{ew}</span>")
-                self._cur_line.setText(" ".join(spans))
-            self._next_line.setText(next_line or "")
+                self._track_lbl.setText(header)
+            self._canvas.update_lyrics(active_line, next_line, progress)
 
     # ------------------------------------------------------------------
     # 7. Live Notification Toast Pill Page (Telegram / Reminder / Timer)
