@@ -567,6 +567,38 @@ class SyncedLyricsTracker:
             daemon=True,
         ).start()
 
+    @staticmethod
+    def _norm_meta(s: str) -> str:
+        s = re.sub(r"\([^)]*\)|\[[^\]]*\]", " ", (s or "").lower())
+        s = re.sub(r"\b(feat|ft|featuring|remaster(?:ed)?|radio edit|explicit|clean|version)\b.*", " ", s)
+        s = re.sub(r"[^a-z0-9\s]", " ", s)
+        return " ".join(s.split())
+
+    @classmethod
+    def _candidate_matches(cls, item: dict[str, Any], want_artist: str, want_title: str) -> bool:
+        """Strictly verify an lrclib result actually matches BOTH the song title and artist (never show wrong song!)."""
+        c_title = cls._norm_meta(str(item.get("trackName") or ""))
+        c_artist = cls._norm_meta(str(item.get("artistName") or ""))
+        w_title = cls._norm_meta(want_title)
+        w_artist = cls._norm_meta(want_artist)
+        if not c_title or not w_title:
+            return False
+        # Title must match closely (exact, substring, or >=75% word overlap)
+        t_words = set(w_title.split())
+        ct_words = set(c_title.split())
+        t_overlap = len(t_words & ct_words) / max(1, len(t_words))
+        title_ok = (w_title == c_title) or (w_title in c_title) or (c_title in w_title) or (t_overlap >= 0.75)
+        if not title_ok:
+            return False
+        # If artist is known, artist MUST also match (at least one primary artist token matches)
+        if w_artist and c_artist:
+            a_words = {w for w in w_artist.split() if len(w) >= 2}
+            ca_words = {w for w in c_artist.split() if len(w) >= 2}
+            artist_ok = (w_artist in c_artist) or (c_artist in w_artist) or bool(a_words & ca_words)
+            if not artist_ok:
+                return False
+        return True
+
     def _fetch_worker(self, key: str, artist: str, title: str, duration_sec: float = 0.0) -> None:
         result: dict[str, Any] = {"status": "none", "synced": [], "plain": []}
         try:
@@ -574,25 +606,35 @@ class SyncedLyricsTracker:
             from urllib.parse import quote
 
             clean_title = re.sub(r"\s*[\(\[].*?[\)\]]", "", title).strip() or title
+            primary_artist = artist.split(",")[0].strip() if "," in artist else artist
             with httpx.Client(timeout=5.0, headers={"User-Agent": "JARVIS-Notch/2.7"}) as client:
-                url = f"https://lrclib.net/api/get?artist_name={quote(artist)}&track_name={quote(clean_title)}"
-                if duration_sec > 10.0:
-                    url += f"&duration={int(round(duration_sec))}"
-                r = client.get(url)
-                item = r.json() if r.status_code == 200 else None
-                if not item or not (item.get("syncedLyrics") or item.get("plainLyrics")):
-                    q = quote(f"{artist} {clean_title}".strip())
-                    r2 = client.get(f"https://lrclib.net/api/search?q={q}")
+                item = None
+                # 1. Exact artist + track lookup (do NOT pass strict duration first, as ±3s causes 404!)
+                if primary_artist:
+                    r = client.get(
+                        f"https://lrclib.net/api/get?artist_name={quote(primary_artist)}&track_name={quote(clean_title)}"
+                    )
+                    if r.status_code == 200:
+                        cand = r.json()
+                        if cand and (cand.get("syncedLyrics") or cand.get("plainLyrics")) and self._candidate_matches(cand, primary_artist, clean_title):
+                            item = cand
+
+                # 2. Structured search fallback with STRICT artist + title verification
+                if not item:
+                    if primary_artist:
+                        s_url = f"https://lrclib.net/api/search?track_name={quote(clean_title)}&artist_name={quote(primary_artist)}"
+                    else:
+                        s_url = f"https://lrclib.net/api/search?track_name={quote(clean_title)}"
+                    r2 = client.get(s_url)
                     if r2.status_code == 200:
                         arr = r2.json() or []
-                        if arr:
-                            # Prefer syncedLyrics whose duration is closest to the playing Spotify track!
-                            synced_candidates = [x for x in arr if x.get("syncedLyrics")]
-                            if synced_candidates and duration_sec > 10.0:
-                                synced_candidates.sort(
-                                    key=lambda x: abs(float(x.get("duration") or 0.0) - duration_sec)
-                                )
-                            item = synced_candidates[0] if synced_candidates else arr[0]
+                        valid = [x for x in arr if self._candidate_matches(x, primary_artist, clean_title)]
+                        synced_valid = [x for x in valid if x.get("syncedLyrics")]
+                        pool = synced_valid or [x for x in valid if x.get("plainLyrics")]
+                        if pool:
+                            if duration_sec > 10.0:
+                                pool.sort(key=lambda x: abs(float(x.get("duration") or 0.0) - duration_sec))
+                            item = pool[0]
 
                 if item:
                     synced_raw = str(item.get("syncedLyrics") or "").strip()
