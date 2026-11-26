@@ -951,35 +951,21 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
                     for w_idx, wd, ww in row_words:
                         s0, s1 = word_bounds[w_idx]
                         span = max(0.01, s1 - s0)
-                        # Smooth 0..1 fill for this specific word (gentle S-curve for natural vocal attack)
-                        raw_wf = max(0.0, min(1.0, (self._progress - s0) / span))
-                        wf = raw_wf * raw_wf * (3.0 - 2.0 * raw_wf)
-                        # Vocal-inflection-reactive float lift (-1.4px on quiet words -> -3.8px on loud vocal swells!)
+                        # Smooth, steady linear 60fps word sweep (zero jerky per-word acceleration!)
+                        wf = max(0.0, min(1.0, (self._progress - s0) / span))
                         is_active = 0.0 < wf < 1.0
-                        lift = -(1.4 + 2.4 * inflect) * math.sin(wf * math.pi) if is_active else (-0.8 if wf >= 1.0 else 0.0)
-
-                        # Soft luminous inflection halo behind the active word when the singer swells
-                        if is_active and inflect > 0.25:
-                            glow_a = int(round(min(72.0, (inflect - 0.20) * 85.0 * math.sin(wf * math.pi) * base_alpha)))
-                            if glow_a > 2:
-                                p.setPen(Qt.PenStyle.NoPen)
-                                p.setBrush(QColor(125, 211, 252, glow_a))
-                                p.drawRoundedRect(QRectF(x - 3.0, y + lift + 2.0, ww + 6.0, row_h - 4.0), 7.0, 7.0)
+                        # Subtle, calm Apple Music-style upward float (-1.2px .. -2.0px with gentle vocal inflection)
+                        lift = -(1.1 + 0.9 * inflect) * math.sin(wf * math.pi) if is_active else (-0.5 if wf >= 1.0 else 0.0)
 
                         # Base muted upcoming word
-                        p.setPen(QColor(255, 255, 255, int(round(76 * base_alpha))))
+                        p.setPen(QColor(255, 255, 255, int(round(78 * base_alpha))))
                         p.drawText(QRectF(x, y + lift, ww + 2.0, row_h), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, wd)
 
-                        # Progressive glowing sweep across the word at 60fps synced to syllable cadence!
+                        # Clean glowing white progressive sweep across the word at 60fps
                         if wf > 0.0:
                             p.save()
                             p.setClipRect(QRectF(x - 1.0, y + lift - 3.0, (ww + 2.0) * wf + 1.0, row_h + 6.0))
-                            if is_active:
-                                # Shift subtly brighter/warmer on higher vocal inflection
-                                b_tint = int(round(255 - 35 * (1.0 - inflect)))
-                                p.setPen(QColor(b_tint, 245, 255, int(round(255 * base_alpha))))
-                            else:
-                                p.setPen(QColor(255, 255, 255, int(round(255 * base_alpha))))
+                            p.setPen(QColor(255, 255, 255, int(round(255 * base_alpha))))
                             p.drawText(QRectF(x, y + lift, ww + 2.0, row_h), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, wd)
                             p.restore()
                         x += ww + space_w

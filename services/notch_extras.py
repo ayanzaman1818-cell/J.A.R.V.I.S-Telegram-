@@ -701,11 +701,11 @@ class SyncedLyricsTracker:
                 if idx + 1 < len(lines):
                     nxt_ts, nxt = lines[idx + 1]
                     raw_span = max(0.5, nxt_ts - cur_ts)
-                    # Follow the song's REAL tempo (90% of the actual gap to the next line, only capping huge >7.5s instrumental breaks)
-                    vocal_span = min(raw_span * 0.90, 7.5)
+                    # Natural sung duration (~78% of line gap, capped at 5.0s for instrumental pauses)
+                    vocal_span = min(raw_span * 0.78, 5.0)
                 else:
                     nxt = ""
-                    vocal_span = 4.0
+                    vocal_span = 3.2
                 prog = max(0.0, min(1.0, (eff_pos - cur_ts) / max(0.35, vocal_span)))
                 return "synced", cur or "♪  •  ♪", nxt, prog
             first = lines[0][1] if lines else ""
