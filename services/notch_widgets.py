@@ -862,6 +862,7 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
             root.addLayout(top)
 
             self._cur_line = QLabel("♪")
+            self._cur_line.setTextFormat(Qt.TextFormat.RichText)
             self._cur_line.setWordWrap(True)
             self._cur_line.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._cur_line.setStyleSheet("color: #ffffff; font-size: 16px; font-weight: 800; background: transparent;")
@@ -870,8 +871,9 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
             self._next_line = QLabel("")
             self._next_line.setWordWrap(True)
             self._next_line.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._next_line.setStyleSheet("color: #64748b; font-size: 12px; font-weight: 600; background: transparent;")
+            self._next_line.setStyleSheet("color: #475569; font-size: 12px; font-weight: 600; background: transparent;")
             root.addWidget(self._next_line)
+            self._last_html_key = ("", "", -1)
 
             # Compact built-in Prev / Play-Pause / Next bar right inside the Lyrics card
             ctrl_row = QHBoxLayout()
@@ -890,9 +892,46 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
                 ctrl_row.addWidget(mb)
             root.addLayout(ctrl_row)
 
-        def set_lyrics(self, header: str, active_line: str, next_line: str) -> None:
+        def set_lyrics(self, header: str, active_line: str, next_line: str, progress: float = 1.0) -> None:
+            import html as _html
+
             self._track_lbl.setText(header)
-            self._cur_line.setText(active_line or "♪")
+            line = active_line or "♪"
+            words = line.split()
+            if len(words) <= 1 or progress >= 0.999 or line.startswith("Searching") or line.startswith("No synced"):
+                active_idx = len(words) - 1
+            else:
+                # Weight each word by its spoken character length so word-by-word highlight tracks natural vocal cadence!
+                weights = [max(2.0, float(len(w)) + 1.2) for w in words]
+                total_w = sum(weights)
+                target_w = max(0.0, min(1.0, float(progress))) * total_w
+                acc = 0.0
+                active_idx = 0
+                for i, wt in enumerate(weights):
+                    acc += wt
+                    if target_w <= acc:
+                        active_idx = i
+                        break
+                    active_idx = i
+
+            key = (line, next_line or "", active_idx)
+            if key == self._last_html_key:
+                return
+            self._last_html_key = key
+
+            if len(words) <= 1 or line.startswith("Searching") or line.startswith("No synced"):
+                self._cur_line.setText(f"<span style='color:#ffffff;'>{_html.escape(line)}</span>")
+            else:
+                spans: list[str] = []
+                for i, w in enumerate(words):
+                    ew = _html.escape(w)
+                    if i < active_idx:
+                        spans.append(f"<span style='color:#ffffff;'>{ew}</span>")
+                    elif i == active_idx:
+                        spans.append(f"<span style='color:#38bdf8;'>{ew}</span>")
+                    else:
+                        spans.append(f"<span style='color:rgba(255,255,255,0.34);'>{ew}</span>")
+                self._cur_line.setText(" ".join(spans))
             self._next_line.setText(next_line or "")
 
     # ------------------------------------------------------------------

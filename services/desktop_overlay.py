@@ -2951,9 +2951,9 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 else:
                     l_art, l_song = "", raw_t_l
                 pos_l, _dur_l, _pl_l = self.service._media_timeline.current_position()
-                _st, cur_ln, nxt_ln = self.service._lyrics_tracker.get_lines_at(l_art, l_song, pos_l)
+                _st, cur_ln, nxt_ln, line_prog = self.service._lyrics_tracker.get_lines_at(l_art, l_song, pos_l)
                 hdr_l = f"{l_song} · {l_art}" if l_art else (l_song or "Live Lyrics")
-                self._lyrics_page.set_lyrics(hdr_l[:44], cur_ln, nxt_ln)
+                self._lyrics_page.set_lyrics(hdr_l[:44], cur_ln, nxt_ln, line_prog)
 
             # Sync Play/Pause vector glyph in Dashboard (respecting instant 0ms optimistic click override)
             if hasattr(self, "_dash_play_btn"):
@@ -3712,33 +3712,83 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._animate_to("lyrics", duration_ms=480)
 
         def _focus_active_media_player(self) -> None:
-            """Bring Spotify / Apple Music / active media window to the foreground."""
+            """Reliably bring Spotify / Apple Music / browser media player to the foreground from ANY app (even from tray!)."""
             if os.name != "nt":
                 return
+            media = self.service.get_cached_now_playing()
+            src_app = str(media.get("source_app") or "").lower()
+
             def _run() -> None:
                 try:
                     u32 = ctypes.windll.user32
+                    k32 = ctypes.windll.kernel32
                     EnumProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
                     target_hwnd = [0]
+
                     def _cb(hwnd: int, _lp: int) -> bool:
                         ln = u32.GetWindowTextLengthW(hwnd)
                         if ln <= 0:
                             return True
+                        cls_b = ctypes.create_unicode_buffer(128)
+                        u32.GetClassNameW(hwnd, cls_b, 128)
+                        cname = cls_b.value
                         b = ctypes.create_unicode_buffer(ln + 1)
                         u32.GetWindowTextW(hwnd, b, ln + 1)
                         tl = b.value.lower()
-                        if "spotify" in tl or "apple music" in tl or "itunes" in tl or (
-                            " - " in b.value and not any(x in tl for x in ("chrome", "edge", "code", "antigravity"))
+                        if src_app == "spotify" or not src_app:
+                            if cname.startswith("Chrome_WidgetWin") and (
+                                tl in ("spotify", "spotify free", "spotify premium")
+                                or (" - " in b.value and not any(x in tl for x in ("chrome", "edge", "firefox", "code", "antigravity", "discord", "telegram")))
+                            ):
+                                target_hwnd[0] = hwnd
+                                return False
+                        if src_app == "apple_music" and ("apple music" in tl or "itunes" in tl):
+                            target_hwnd[0] = hwnd
+                            return False
+                        if src_app in ("youtube", "youtube_music", "soundcloud") and (
+                            "youtube" in tl or "soundcloud" in tl
                         ):
                             target_hwnd[0] = hwnd
                             return False
                         return True
+
                     u32.EnumWindows(EnumProc(_cb), 0)
-                    if target_hwnd[0]:
-                        u32.ShowWindow(target_hwnd[0], 9)  # SW_RESTORE
-                        u32.SetForegroundWindow(target_hwnd[0])
+                    hwnd = target_hwnd[0]
+
+                    # If Spotify/Apple Music is minimized to system tray (hidden window), URI launch restores & focuses it 100%!
+                    if src_app == "spotify" and (not hwnd or not u32.IsWindowVisible(hwnd)):
+                        os.startfile("spotify:")
+                        return
+                    if src_app == "apple_music" and (not hwnd or not u32.IsWindowVisible(hwnd)):
+                        os.startfile("music:")
+                        return
+
+                    if hwnd:
+                        # Bypass Windows foreground lock cleanly using AttachThreadInput + ALT pulse
+                        fg_hwnd = u32.GetForegroundWindow()
+                        fg_tid = u32.GetWindowThreadProcessId(fg_hwnd, None) if fg_hwnd else 0
+                        cur_tid = k32.GetCurrentThreadId()
+                        attached = False
+                        if fg_tid and fg_tid != cur_tid:
+                            attached = bool(u32.AttachThreadInput(cur_tid, fg_tid, True))
+                        try:
+                            # Send harmless ALT key press/release so Windows permits SetForegroundWindow from a Tool overlay
+                            u32.keybd_event(0x12, 0, 0, 0)
+                            u32.keybd_event(0x12, 0, 2, 0)
+                            if u32.IsIconic(hwnd):
+                                u32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                            else:
+                                u32.ShowWindow(hwnd, 5)  # SW_SHOW
+                            u32.BringWindowToTop(hwnd)
+                            u32.SetForegroundWindow(hwnd)
+                        finally:
+                            if attached:
+                                u32.AttachThreadInput(cur_tid, fg_tid, False)
+                    elif src_app == "spotify":
+                        os.startfile("spotify:")
                 except Exception:
                     pass
+
             threading.Thread(target=_run, daemon=True).start()
 
         def _open_audio_output_menu(self) -> None:

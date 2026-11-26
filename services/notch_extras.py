@@ -608,8 +608,8 @@ class SyncedLyricsTracker:
                 if self._fetching_key == key:
                     self._fetching_key = ""
 
-    def get_lines_at(self, artist: str, title: str, pos_sec: float) -> tuple[str, str, str]:
-        """Return (status ['loading'|'synced'|'plain'|'none'], active_line, next_line)."""
+    def get_lines_at(self, artist: str, title: str, pos_sec: float) -> tuple[str, str, str, float]:
+        """Return (status ['loading'|'synced'|'plain'|'none'], active_line, next_line, line_progress_0_to_1)."""
         key = f"{artist.strip().lower()}||{title.strip().lower()}"
         with self._lock:
             entry = self._cache.get(key)
@@ -617,24 +617,34 @@ class SyncedLyricsTracker:
         if entry is None:
             if not fetching:
                 self.request_track(artist, title)
-            return "loading", "Searching synced lyrics…", ""
+            return "loading", "Searching synced lyrics…", "", 0.0
 
         status = entry["status"]
         if status == "synced":
             lines: list[tuple[float, str]] = entry["synced"]
             idx = -1
             for i, (ts, _txt) in enumerate(lines):
-                if ts <= pos_sec + 0.15:
+                if ts <= pos_sec + 0.12:
                     idx = i
                 else:
                     break
-            cur = lines[idx][1] if 0 <= idx < len(lines) else (lines[0][1] if lines else "")
-            nxt = lines[idx + 1][1] if (0 <= idx + 1 < len(lines)) else ""
-            return "synced", cur or "♪  •  ♪", nxt
+            if 0 <= idx < len(lines):
+                cur_ts, cur = lines[idx]
+                if idx + 1 < len(lines):
+                    nxt_ts, nxt = lines[idx + 1]
+                    span = max(0.6, min(10.0, nxt_ts - cur_ts))
+                else:
+                    nxt = ""
+                    span = 4.0
+                # Slight lead-in (0.12s) so the active word lights up right on the vocal attack
+                prog = max(0.0, min(1.0, (pos_sec - cur_ts + 0.12) / span))
+                return "synced", cur or "♪  •  ♪", nxt, prog
+            first = lines[0][1] if lines else ""
+            return "synced", "♪  •  ♪", first, 0.0
         if status == "plain":
             pl: list[str] = entry["plain"]
-            return "plain", pl[0] if pl else "", pl[1] if len(pl) > 1 else ""
-        return "none", "No synced lyrics found", ""
+            return "plain", pl[0] if pl else "", pl[1] if len(pl) > 1 else "", 1.0
+        return "none", "No synced lyrics found", "", 0.0
 
 
 # ---------------------------------------------------------------------------
