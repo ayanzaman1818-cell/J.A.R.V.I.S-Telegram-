@@ -415,8 +415,10 @@ def _local_system_prompt(query: str = "", user_id: int | None = None) -> str:
     base = (
         f"You are JARVIS, a brilliant, loyal personal AI assistant with dry British wit. "
         f"Current date and time: {now}. User's home location: {config.LOCATION}. "
-        "IMPORTANT: Your training knowledge cutoff is in the past. Always prioritize the live web facts "
-        "and your recent Second Brain reading notes below over outdated training memory."
+        "IMPORTANT: When the user asks you to perform an action (play/pause/skip music, change volume, "
+        "start a timer, set a reminder, check weather, open an app, etc.), ALWAYS call the provided tool "
+        "instead of claiming you did it in plain text. "
+        "Always prioritize live tool results, web facts, and your Second Brain notes over outdated memory."
     )
     extra_blocks: list[str] = []
     try:
@@ -487,15 +489,15 @@ def _select_relevant_tools_for_local(user_query: str, all_schemas: list[dict[str
         return []
 
     keywords_map: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
-        (("weather", "temperature", "rain", "forecast"), ("weather",)),
-        (("time", "remind", "reminder", "alarm"), ("set_reminder", "set_reminder_at", "list_reminders")),
+        (("weather", "temperature", "rain", "forecast"), ("get_weather",)),
+        (("time", "timer", "pomodoro", "countdown", "focus", "remind", "reminder", "alarm"), ("start_focus_timer", "set_reminder", "set_reminder_at", "list_reminders")),
         (("task", "todo", "to-do"), ("add_task", "list_tasks", "complete_task")),
         (("calendar", "schedule", "meeting", "event", "holiday"), ("calendar_today", "calendar_search", "calendar_prepare_event", "confirm_action")),
         (("email", "gmail", "inbox", "mail", "send"), ("gmail_search", "gmail_read", "gmail_prepare_email", "confirm_action", "web_search")),
         (("drive", "doc", "file"), ("drive_search", "drive_create_text_prepare", "confirm_action")),
         (("search", "look up", "google", "news", "web", "price", "cost", "worth", "about", "latest", "release", "game", "movie"), ("web_search", "tech_news", "price_lookup", "read_page")),
-        (("screen", "window", "click", "type", "desktop", "open", "launch", "pc", "volume", "battery", "screenshot", "clipboard"), ("see_screen", "pc_status", "pc_screenshot", "pc_launch_app", "pc_volume", "pc_clipboard_get", "pc_clipboard_set", "desktop_click", "desktop_type")),
-        (("spotify", "music", "song", "play", "pause", "track"), ("spotify_status", "spotify_control", "spotify_play_query")),
+        (("screen", "window", "click", "type", "desktop", "open", "launch", "pc", "volume", "mute", "lock", "battery", "screenshot", "clipboard"), ("see_screen", "pc_status", "pc_screenshot", "pc_launch_app", "pc_media_control", "pc_lock", "pc_clipboard_get", "pc_clipboard_set", "desktop_click", "desktop_type")),
+        (("spotify", "music", "song", "play", "pause", "skip", "next", "previous", "track", "resume"), ("spotify_play", "spotify_status", "pc_media_control")),
         (("connect", "composio", "github", "notion", "slack", "discord", "trello"), ("composio_list_connections", "composio_connect_app", "composio_execute_action")),
         (("remember", "memory", "forget"), ("remember", "list_memories", "forget_memory")),
         (("note", "knowledge", "archive", "save"), ("save_note", "search_knowledge", "list_notes")),
