@@ -1,8 +1,18 @@
 # The J.A.R.V.I.S Notch
 
-A Dynamic Island–inspired **Windows Desktop Notch & AI Command Hub**, powered by a hybrid **Local LM Studio (Qwen3 8B) + Google Gemini / Gemma** brain with full Telegram, PC control, and Composio integrations.
+A Dynamic Island–inspired **Windows Desktop Notch & AI Command Hub**, powered by our own custom fine-tuned **[JARVIS-Qwen-7B (`AyanZaman19/jarvis-qwen-7b-gguf`)](https://huggingface.co/AyanZaman19/jarvis-qwen-7b-gguf)** local model via LM Studio + **Google Gemini / Gemma** cloud fallback, with full Telegram, PC control, and Composio integrations.
 
 Built with Python & PySide6 — featuring solid pitch-black (`#07080b`) borderless aesthetics, bundled Apple **SF Pro Display / SF Pro Text** typography, custom hand-drawn `QPainter` vector icons (zero Windows emojis), and silky spring animations.
+
+---
+
+## Custom Fine-Tuned Model: JARVIS-Qwen-7B
+
+We trained and fine-tuned our own dedicated local LLM specifically for **The J.A.R.V.I.S Notch** using QLoRA + Unsloth and published both the model and dataset openly under **Apache 2.0**:
+
+- **Model (4-bit `Q4_K_M` GGUF for LM Studio):** [`AyanZaman19/jarvis-qwen-7b-gguf`](https://huggingface.co/AyanZaman19/jarvis-qwen-7b-gguf)
+- **Custom Dataset:** [`AyanZaman19/jarvis-notch-dataset`](https://huggingface.co/datasets/AyanZaman19/jarvis-notch-dataset)
+- **Built-In Everywhere:** Available as the default 1-click preset (**`JARVIS Qwen 7B (Custom)`**) in both the **Notch Top-Bar Model Switcher** and the **Telegram `/model` menu**, with native tool calling, live web grounding, and dry British J.A.R.V.I.S. wit.
 
 ---
 
@@ -75,10 +85,10 @@ Copy-Item .env.example .env
 Edit `.env` with your preferred provider and optional integrations (never commit `.env`):
 
 ```dotenv
-# Primary LLM (Local LM Studio or Google Gemini)
-LLM_MODEL=lmstudio:qwen3-8b
+# Primary LLM (Custom JARVIS-Qwen-7B via LM Studio or Google Gemini)
+LLM_MODEL=lmstudio:jarvis-qwen-7b
 LLM_FALLBACK_MODEL=gemini-3.5-flash-lite
-LMSTUDIO_BASE_URL=http://127.0.0.1:1234/v1
+LOCAL_LLM_BASE_URL=http://127.0.0.1:1234/v1
 
 # Google Gemini (Cloud / Fallback)
 GEMINI_API_KEY=
