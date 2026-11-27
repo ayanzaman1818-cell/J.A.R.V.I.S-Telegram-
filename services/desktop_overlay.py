@@ -1348,10 +1348,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self.setToolTip(tooltip)
             self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             self._hover_anim = QVariantAnimation(self)
-            self._hover_anim.setDuration(260)
-            _hc = QEasingCurve(QEasingCurve.Type.OutBack)
-            _hc.setOvershoot(1.35)
-            self._hover_anim.setEasingCurve(_hc)
+            self._hover_anim.setDuration(220)
+            self._hover_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
             self._hover_anim.valueChanged.connect(self._on_hover_val)
 
         def _on_hover_val(self, val: Any) -> None:
@@ -3158,32 +3156,26 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._fade_anim.setEndValue(1.0)
                 self._fade_anim.start()
 
-            # Silky, unhurried OutBack spring curves (smooth launch -> tasteful visible bounce -> velvety settle)
+            # Smooth, steady, silky easing curves everywhere (zero overshoot/bounce)
             self._anim.stop()
             if new_state == "hover":
-                curve = QEasingCurve(QEasingCurve.Type.OutBack)
-                curve.setOvershoot(2.0)
-                eff_dur = 500
+                curve = QEasingCurve(QEasingCurve.Type.OutCubic)
+                eff_dur = 300
             elif key == "tucked":
-                # Silky, unhurried glide out of the way when hovering browser tabs
                 curve = QEasingCurve(QEasingCurve.Type.InOutCubic)
-                eff_dur = 460
+                eff_dur = 360
             elif new_state == "idle" and not was_expanded:
-                # Silky, bouncy spring pop when untucking or morphing between idle states (music/clock/hud)
-                curve = QEasingCurve(QEasingCurve.Type.OutBack)
-                curve.setOvershoot(2.1)
-                eff_dur = 580
+                curve = QEasingCurve(QEasingCurve.Type.OutQuart)
+                eff_dur = 360
             elif new_state == "idle":
-                curve = QEasingCurve(QEasingCurve.Type.InOutQuart)
-                eff_dur = 580
+                curve = QEasingCurve(QEasingCurve.Type.InOutCubic)
+                eff_dur = 380
             elif was_expanded and is_expanding:
-                curve = QEasingCurve(QEasingCurve.Type.OutBack)
-                curve.setOvershoot(1.55)
-                eff_dur = 540
+                curve = QEasingCurve(QEasingCurve.Type.InOutCubic)
+                eff_dur = 360
             else:
-                curve = QEasingCurve(QEasingCurve.Type.OutBack)
-                curve.setOvershoot(1.85)
-                eff_dur = 600
+                curve = QEasingCurve(QEasingCurve.Type.OutQuart)
+                eff_dur = 400
             self._anim.setDuration(eff_dur)
             self._anim.setEasingCurve(curve)
             self._anim.setStartValue(QSizeF(float(self._notch_w), float(self._notch_h)))
@@ -4319,15 +4311,9 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             cur_w = self._dash_media_container.maximumWidth()
             if cur_w > 500:
                 cur_w = 232 if self._dash_media_container.isVisible() else 0
-            # Silky spring pop when sliding out, magnetic anticipation + cushioned settle when pulling back in
-            if expand:
-                m_curve = QEasingCurve(QEasingCurve.Type.OutBack)
-                m_curve.setOvershoot(1.08)
-                m_dur = 620
-            else:
-                m_curve = QEasingCurve(QEasingCurve.Type.InOutBack)
-                m_curve.setOvershoot(0.68)
-                m_dur = 660
+            # Smooth, steady glide for media panel expand & retract (no bounce)
+            m_curve = QEasingCurve(QEasingCurve.Type.OutQuart if expand else QEasingCurve.Type.InOutCubic)
+            m_dur = 400 if expand else 420
             self._media_panel_anim.setDuration(m_dur)
             self._media_panel_anim.setEasingCurve(m_curve)
             self._media_panel_anim.setStartValue(float(cur_w))
