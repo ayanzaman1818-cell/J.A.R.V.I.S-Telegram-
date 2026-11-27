@@ -2476,9 +2476,9 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             "idle_music": (236, 24),       # Sleek horizontal music strip: Squircle Album Cover + Live Track & Progress + Visualizer
             "idle_music_clock": (316, 24), # Wider horizontal music strip + orange Timer/Stopwatch on the right!
             "hover": (176, 20),            # Slightly larger hovered pill with status dot + JARVIS text
-            "hover_clock": (172, 25),      # Hovered Timer/Stopwatch pill
+            "hover_clock": (236, 36),      # Expanded hovered Timer/Stopwatch pill with 'Timer' label + Cancel (X) button
             "hover_music": (268, 26),      # Hovered horizontal music strip with 1-click Prev / Play-Pause / Next controls
-            "hover_music_clock": (350, 26),# Hovered wider music + Timer/Stopwatch strip
+            "hover_music_clock": (396, 34),# Expanded hovered music + Timer strip with 'Timer' label + Cancel (X) button
             "dashboard": (582, 142),       # Compact horizontal Dashboard when NO audio is playing
             "dashboard_music": (830, 146), # Wide horizontal Dashboard WITH Media Player when audio is playing!
             "tools": (608, 244),           # Utility Hub: Drag-and-Drop File Shelf, Clipboard History, Live Mirror, Quick Timer
@@ -3282,6 +3282,10 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
         def leaveEvent(self, event: Any) -> None:
             if self.state == "hover":
+                self._hover_media_hit = ""
+                self._hover_timer_cancel_hit = False
+                self._hover_timer_cancel_rect = None
+                self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
                 local = self.mapFromGlobal(QCursor.pos())
                 if 3 <= local.y() <= 54 and abs(local.x() - CANVAS_W / 2.0) <= 165.0:
                     self._tucked_dodge = True
@@ -3289,25 +3293,48 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             super().leaveEvent(event)
 
         def mouseMoveEvent(self, event: Any) -> None:
-            if self.state == "hover" and getattr(self, "_music_playing_active", False):
+            if self.state == "hover":
                 pt = event.position()
+                changed = False
                 hit = ""
-                for act, rect in getattr(self, "_hover_media_rects", {}).items():
-                    if rect.contains(pt):
-                        hit = act
-                        break
+                if getattr(self, "_music_playing_active", False):
+                    for act, rect in getattr(self, "_hover_media_rects", {}).items():
+                        if rect.contains(pt):
+                            hit = act
+                            break
                 if hit != getattr(self, "_hover_media_hit", ""):
                     self._hover_media_hit = hit
-                    self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor if hit else Qt.CursorShape.ArrowCursor))
+                    changed = True
+
+                cancel_rect = getattr(self, "_hover_timer_cancel_rect", None)
+                cancel_hit = bool(cancel_rect and cancel_rect.contains(pt))
+                if cancel_hit != getattr(self, "_hover_timer_cancel_hit", False):
+                    self._hover_timer_cancel_hit = cancel_hit
+                    changed = True
+
+                if changed:
+                    self.setCursor(
+                        QCursor(
+                            Qt.CursorShape.PointingHandCursor
+                            if (hit or cancel_hit)
+                            else Qt.CursorShape.ArrowCursor
+                        )
+                    )
                     self.update()
             super().mouseMoveEvent(event)
 
         def mousePressEvent(self, event: Any) -> None:
             if self.state in ("idle", "hover"):
                 if event.button() == Qt.MouseButton.LeftButton:
+                    pt = event.position()
+                    # In hover_clock / hover_music_clock, clicking the X button cancels the running timer!
+                    if self.state == "hover":
+                        cancel_rect = getattr(self, "_hover_timer_cancel_rect", None)
+                        if cancel_rect and cancel_rect.contains(pt):
+                            self._on_stop_quick_timer()
+                            return
                     # In hover_music, clicking any of the 3 mini vector controls controls playback directly!
                     if self.state == "hover" and getattr(self, "_music_playing_active", False):
-                        pt = event.position()
                         for act, rect in getattr(self, "_hover_media_rects", {}).items():
                             if rect.contains(pt):
                                 self._on_dash_media_control(act)
@@ -3463,7 +3490,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 priv_slot = 20.0 if (getattr(self, "_priv_mic", False) or getattr(self, "_priv_cam", False)) else 0.0
                 eff_right = right - priv_slot
                 clock_active = bool(getattr(self, "_clock_active", False)) and bool(getattr(self, "_clock_fmt", ""))
-                clock_zone_w = 78.0 if clock_active else 0.0
+                clock_hover_expanded = clock_active and self.state == "hover" and nh >= 29
+                clock_zone_w = (134.0 if clock_hover_expanded else 78.0) if clock_active else 0.0
                 bars = self._vis_bars
                 bar_w = 2.6
                 gap = 2.1
@@ -3593,51 +3621,139 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     p.setPen(QPen(QColor(255, 159, 10, 72), 1.0))
                     p.drawLine(QPointF(div_x, 5.0), QPointF(div_x, nh - 5.0))
 
-                    icon_cx = div_x + 12.5
+                    icon_cx = div_x + 13.0
                     icon_cy = nh / 2.0
                     c_mode = getattr(self, "_clock_mode", "timer")
                     c_sec = getattr(self, "_clock_exact_sec", 0.0)
                     c_frac = getattr(self, "_clock_frac", 0.75)
                     if c_mode == "stopwatch":
-                        _draw_stopwatch_icon(p, icon_cx, icon_cy, 5.2, c_sec)
+                        _draw_stopwatch_icon(p, icon_cx, icon_cy, 5.8 if clock_hover_expanded else 5.2, c_sec)
                     else:
-                        _draw_timer_icon(p, icon_cx, icon_cy, 5.2, c_sec, c_frac)
+                        _draw_timer_icon(p, icon_cx, icon_cy, 5.8 if clock_hover_expanded else 5.2, c_sec, c_frac)
 
-                    c_font = QFont("SF Pro Display", 8, QFont.Weight.Bold)
+                    c_txt = getattr(self, "_clock_fmt", "")
+                    if clock_hover_expanded:
+                        # Expanded hovered timer zone: 'Timer' micro-label + countdown + circular X cancel button
+                        lbl_font = QFont("SF Pro Display", 8, QFont.Weight.DemiBold)
+                        p.setFont(lbl_font)
+                        p.setPen(QColor(255, 206, 138, 215))
+                        p.drawText(
+                            QRectF(icon_cx + 9.0, 0.0, 34.0, nh),
+                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                            "Timer" if c_mode != "stopwatch" else "Watch",
+                        )
+
+                        btn_sz = 18.0
+                        btn_x = eff_right - btn_sz - 7.0
+                        btn_y = (nh - btn_sz) / 2.0
+                        c_rect = QRectF(btn_x, btn_y, btn_sz, btn_sz)
+                        self._hover_timer_cancel_rect = c_rect
+
+                        c_font = QFont("SF Pro Display", 9, QFont.Weight.Bold)
+                        p.setFont(c_font)
+                        p.setPen(QColor("#ff9f0a"))
+                        p.drawText(
+                            QRectF(icon_cx + 41.0, 0.0, btn_x - (icon_cx + 41.0) - 5.0, nh),
+                            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                            c_txt,
+                        )
+
+                        # Circular X cancel button
+                        c_hit = getattr(self, "_hover_timer_cancel_hit", False)
+                        p.setPen(Qt.PenStyle.NoPen)
+                        p.setBrush(QColor(255, 69, 58, 135 if c_hit else 55))
+                        p.drawEllipse(c_rect)
+                        p.setPen(QPen(QColor("#ffffff" if c_hit else "#ff6961"), 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                        cx_b = c_rect.center().x()
+                        cy_b = c_rect.center().y()
+                        p.drawLine(QPointF(cx_b - 3.2, cy_b - 3.2), QPointF(cx_b + 3.2, cy_b + 3.2))
+                        p.drawLine(QPointF(cx_b + 3.2, cy_b - 3.2), QPointF(cx_b - 3.2, cy_b + 3.2))
+                    else:
+                        self._hover_timer_cancel_rect = None
+                        c_font = QFont("SF Pro Display", 8, QFont.Weight.Bold)
+                        p.setFont(c_font)
+                        p.setPen(QColor("#ff9f0a"))
+                        p.drawText(
+                            QRectF(icon_cx + 8.5, 0.0, eff_right - (icon_cx + 8.5) - 9.0, nh),
+                            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                            c_txt,
+                        )
+                else:
+                    self._hover_timer_cancel_rect = None
+
+                p.restore()
+            elif self.state in ("idle", "hover") and getattr(self, "_clock_active", False) and nh >= 13:
+                # --- Standalone Orange Windows Clock Timer / Stopwatch Notch ---
+                p.save()
+                p.setClipPath(path)
+
+                priv_slot = 20.0 if (getattr(self, "_priv_mic", False) or getattr(self, "_priv_cam", False)) else 0.0
+                eff_right = right - priv_slot
+                c_mode = getattr(self, "_clock_mode", "timer")
+                c_sec = getattr(self, "_clock_exact_sec", 0.0)
+                c_frac = getattr(self, "_clock_frac", 0.75)
+                c_txt = getattr(self, "_clock_fmt", "")
+
+                if self.state == "hover" and nh >= 29:
+                    # Expanded hovered Timer pill: Orange Icon + 'Timer' label + live countdown + circular X cancel button
+                    icon_cx = left + 20.0
+                    icon_cy = nh / 2.0
+                    if c_mode == "stopwatch":
+                        _draw_stopwatch_icon(p, icon_cx, icon_cy, 7.0, c_sec)
+                    else:
+                        _draw_timer_icon(p, icon_cx, icon_cy, 7.0, c_sec, c_frac)
+
+                    lbl_font = QFont("SF Pro Display", 10, QFont.Weight.DemiBold)
+                    p.setFont(lbl_font)
+                    p.setPen(QColor(255, 210, 145, 230))
+                    p.drawText(
+                        QRectF(left + 34.0, 0.0, 68.0, nh),
+                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                        "Stopwatch" if c_mode == "stopwatch" else "Timer",
+                    )
+
+                    btn_sz = 20.0
+                    btn_x = eff_right - btn_sz - 10.0
+                    btn_y = (nh - btn_sz) / 2.0
+                    c_rect = QRectF(btn_x, btn_y, btn_sz, btn_sz)
+                    self._hover_timer_cancel_rect = c_rect
+
+                    c_font = QFont("SF Pro Display", 11, QFont.Weight.Bold)
                     p.setFont(c_font)
                     p.setPen(QColor("#ff9f0a"))
-                    c_txt = getattr(self, "_clock_fmt", "")
                     p.drawText(
-                        QRectF(icon_cx + 8.5, 0.0, eff_right - (icon_cx + 8.5) - 9.0, nh),
+                        QRectF(left + 84.0, 0.0, btn_x - (left + 84.0) - 9.0, nh),
                         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                         c_txt,
                     )
 
-                p.restore()
-            elif self.state in ("idle", "hover") and getattr(self, "_clock_active", False) and nh >= 13:
-                # --- Standalone Orange Windows Clock Timer / Stopwatch Notch (Icon on left, Time on right) ---
-                p.save()
-                p.setClipPath(path)
-
-                icon_cx = left + 16.0
-                icon_cy = nh / 2.0
-                c_mode = getattr(self, "_clock_mode", "timer")
-                c_sec = getattr(self, "_clock_exact_sec", 0.0)
-                c_frac = getattr(self, "_clock_frac", 0.75)
-                if c_mode == "stopwatch":
-                    _draw_stopwatch_icon(p, icon_cx, icon_cy, 5.6, c_sec)
+                    # Clean circular vector X cancel button
+                    c_hit = getattr(self, "_hover_timer_cancel_hit", False)
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.setBrush(QColor(255, 69, 58, 140 if c_hit else 56))
+                    p.drawEllipse(c_rect)
+                    p.setPen(QPen(QColor("#ffffff" if c_hit else "#ff6961"), 1.7, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                    cx_b = c_rect.center().x()
+                    cy_b = c_rect.center().y()
+                    p.drawLine(QPointF(cx_b - 3.6, cy_b - 3.6), QPointF(cx_b + 3.6, cy_b + 3.6))
+                    p.drawLine(QPointF(cx_b + 3.6, cy_b - 3.6), QPointF(cx_b - 3.6, cy_b + 3.6))
                 else:
-                    _draw_timer_icon(p, icon_cx, icon_cy, 5.6, c_sec, c_frac)
+                    self._hover_timer_cancel_rect = None
+                    icon_cx = left + 16.0
+                    icon_cy = nh / 2.0
+                    if c_mode == "stopwatch":
+                        _draw_stopwatch_icon(p, icon_cx, icon_cy, 5.6, c_sec)
+                    else:
+                        _draw_timer_icon(p, icon_cx, icon_cy, 5.6, c_sec, c_frac)
 
-                c_font = QFont("SF Pro Display", 9, QFont.Weight.Bold)
-                p.setFont(c_font)
-                p.setPen(QColor("#ff9f0a"))
-                c_txt = getattr(self, "_clock_fmt", "")
-                p.drawText(
-                    QRectF(left + 28.0, 0.0, nw - 40.0, nh),
-                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                    c_txt,
-                )
+                    c_font = QFont("SF Pro Display", 9, QFont.Weight.Bold)
+                    p.setFont(c_font)
+                    p.setPen(QColor("#ff9f0a"))
+                    p.drawText(
+                        QRectF(left + 28.0, 0.0, (eff_right - left) - 40.0, nh),
+                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                        c_txt,
+                    )
 
                 p.restore()
             elif self.state == "idle" and (getattr(self, "_priv_mic", False) or getattr(self, "_priv_cam", False)) and nh >= 12:
@@ -3866,6 +3982,11 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
         def _on_stop_quick_timer(self) -> None:
             self.service._clock_tracker.stop_quick_timer()
+            self._clock_active = False
+            self._clock_fmt = ""
+            self._hover_timer_cancel_rect = None
+            self._hover_timer_cancel_hit = False
+            self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
             self._animate_to("idle", duration_ms=440)
 
         def _on_notification_toast(self, title: str, body: str, source: str = "JARVIS") -> None:
@@ -4045,14 +4166,18 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 tb.clicked.connect(lambda _c=False, m=mins: self._on_start_quick_timer(m * 60, f"{m}m Focus"))
                 quick_row.addWidget(tb)
 
-            for tab_i, lbl, tip in ((2, "Mirror", "Open live full-notch Webcam Mirror"), (1, "Clip", "Open Clipboard History")):
+            for tab_i, lbl, tip, min_w in (
+                (2, "Mirror", "Open live full-notch Webcam Mirror", 44),
+                (1, "Clip", "Open Clipboard History", 32),
+            ):
                 qb = QPushButton(lbl)
                 qb.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
                 qb.setFixedHeight(20)
+                qb.setMinimumWidth(min_w)
                 qb.setToolTip(tip)
                 qb.setStyleSheet(
                     "QPushButton { background: rgba(255,255,255,0.08); color: #cbd5e1; border: none; "
-                    "border-radius: 7px; padding: 0 7px; font-size: 9.5px; font-weight: 700; }"
+                    "border-radius: 7px; padding: 0 5px; font-size: 9px; font-weight: 700; }"
                     "QPushButton:hover { background: rgba(56,189,248,0.22); color: #ffffff; }"
                 )
                 qb.clicked.connect(lambda _c=False, ti=tab_i: self._open_tools_hub(ti))
