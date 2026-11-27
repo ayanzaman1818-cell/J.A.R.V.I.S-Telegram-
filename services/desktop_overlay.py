@@ -4657,6 +4657,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
             # Live LLM Model Switcher Pill in the Notch Top Bar (Cloud Gemini/Gemma + Local LM Studio)
             self._model_cycle_list = [
+                ("lmstudio:jarvis-qwen-7b", "JARVIS Qwen 7B (Custom)"),
                 ("lmstudio:qwen3-8b", "⚡ LM Studio: Qwen3 8B"),
                 ("lmstudio:auto", "💻 LM Studio (Active Model)"),
                 ("gemma-4-26b-a4b-it", "🧠 Gemma 4 26B"),

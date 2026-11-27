@@ -323,6 +323,8 @@ def model_health() -> dict[str, Any]:
 
 
 MODEL_PRESETS: dict[str, str] = {
+    "jarvis7b": "lmstudio:jarvis-qwen-7b",
+    "jarvis": "lmstudio:jarvis-qwen-7b",
     "qwen38b": "lmstudio:qwen3-8b",
     "qwen8b": "lmstudio:qwen3-8b",
     "gemma26b": "gemma-4-26b-a4b-it",

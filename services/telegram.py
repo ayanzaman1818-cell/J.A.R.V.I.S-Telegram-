@@ -311,6 +311,10 @@ class TelegramService:
         markup = InlineKeyboardMarkup(
             [
                 [
+                    InlineKeyboardButton("🤖 JARVIS Qwen 7B (Custom)", callback_data="model_set:jarvis7b"),
+                    InlineKeyboardButton("💻 LM Studio: Active Model", callback_data="model_set:lmstudio"),
+                ],
+                [
                     InlineKeyboardButton("☁️ Gemma 4 26B", callback_data="model_set:gemma26b"),
                     InlineKeyboardButton("⚡ Gemini 3.5 Lite", callback_data="model_set:flashlite"),
                 ],
@@ -320,10 +324,9 @@ class TelegramService:
                 ],
                 [
                     InlineKeyboardButton("⚡ LM Studio: Qwen3 8B", callback_data="model_set:qwen38b"),
-                    InlineKeyboardButton("💻 LM Studio: Active Model", callback_data="model_set:lmstudio"),
+                    InlineKeyboardButton("🌿 LM Studio: Bonsai 27B", callback_data="model_set:bonsai27b"),
                 ],
                 [
-                    InlineKeyboardButton("🌿 LM Studio: Bonsai 27B", callback_data="model_set:bonsai27b"),
                     InlineKeyboardButton("💻 LM Studio: Qwen 2.5 7B", callback_data="model_set:qwen7b"),
                 ],
             ]
