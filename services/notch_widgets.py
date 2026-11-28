@@ -1988,30 +1988,17 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
             self.sync_offset_sec = max(-5.0, min(5.0, self.sync_offset_sec + delta))
 
         def set_album_pixmap(self, pm: Optional[QPixmap]) -> None:
-            """Create an Apple Music-style softly blurred ultra-dark ambient album art backdrop."""
+            """Cache a softly blurred ambient album backdrop (painted edge-to-edge on the outer notch)."""
             if pm is None or pm.isNull():
                 self._ambient_bg_pm = None
-                self.update()
                 return
             try:
-                # Downscale to 24x24 then smooth-upscale -> instant, zero-cost Gaussian-like ambient blur!
                 tiny = pm.scaled(24, 24, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
-                self._ambient_bg_pm = tiny.scaled(240, 120, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                self._ambient_bg_pm = tiny.scaled(320, 180, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
             except Exception:
                 self._ambient_bg_pm = None
-            self.update()
 
         def paintEvent(self, ev: Any) -> None:
-            if self._ambient_bg_pm is not None and not self._ambient_bg_pm.isNull():
-                p = QPainter(self)
-                p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-                p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-                clip = QPainterPath()
-                clip.addRoundedRect(QRectF(self.rect().adjusted(2, 0, -2, 0)), 18.0, 18.0)
-                p.setClipPath(clip)
-                p.setOpacity(0.13)
-                p.drawPixmap(self.rect(), self._ambient_bg_pm)
-                p.setOpacity(1.0)
             super().paintEvent(ev)
 
         def set_lyrics(

@@ -3597,8 +3597,19 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             p.drawPath(path)
 
             if nh > 60:
+                # Full edge-to-edge ambient blurred album backdrop when Lyrics card is open (zero black border!)
+                if self.state == "lyrics" and hasattr(self, "_lyrics_page"):
+                    bg_pm = getattr(self._lyrics_page, "_ambient_bg_pm", None)
+                    if bg_pm is not None and not bg_pm.isNull():
+                        p.save()
+                        p.setClipPath(path)
+                        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+                        p.setOpacity(0.18)
+                        p.drawPixmap(QRectF(left - ear, 0.0, nw + ear * 2.0, nh), bg_pm, QRectF(0.0, 0.0, float(bg_pm.width()), float(bg_pm.height())))
+                        p.setOpacity(1.0)
+                        p.restore()
                 # Subtle album-art ambient tint strictly inside the left Now Playing card (zero outer glow!)
-                if self.state == "dashboard" and getattr(self, "_media_panel_expanded", False):
+                elif self.state == "dashboard" and getattr(self, "_media_panel_expanded", False):
                     pal = self.service._current_art_palette or [(56, 189, 248)]
                     c0 = QColor(*pal[0])
                     p.save()
@@ -4135,6 +4146,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             _pos, dur, _pl = self.service._media_timeline.current_position()
             if song:
                 self.service._lyrics_tracker.request_track(art, song, duration_sec=dur)
+            if hasattr(self, "_lyrics_page"):
+                self._lyrics_page.set_album_pixmap(self._art_pixmap)
             self._animate_to("lyrics", duration_ms=480)
 
         def _focus_active_media_player(self) -> None:
