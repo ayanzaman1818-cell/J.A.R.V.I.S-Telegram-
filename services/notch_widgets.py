@@ -830,7 +830,7 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
 
         def __init__(self, parent: Optional[QWidget] = None) -> None:
             super().__init__(parent)
-            self.setFixedHeight(136)
+            self.setFixedSize(416, 140)
             self.setMouseTracking(True)
             self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
             # (label, max_val, wrap, default_val)
@@ -866,9 +866,9 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
 
         def _col_at_x(self, x: float) -> int:
             w = max(1.0, float(self.width()))
-            # Center 3 columns inside the horizontal pill area
-            pad = max(12.0, (w - 360.0) / 2.0)
-            col_w = (w - pad * 2.0) / 3.0
+            pill_w = min(w - 16.0, 400.0)
+            pad = (w - pill_w) / 2.0
+            col_w = pill_w / 3.0
             idx = int((x - pad) / max(1.0, col_w))
             return max(0, min(2, idx))
 
@@ -969,7 +969,7 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
             h = float(self.height())
             cy = h / 2.0
 
-            pill_w = min(w - 20.0, 368.0)
+            pill_w = min(w - 16.0, 400.0)
             pill_l = (w - pill_w) / 2.0
             pill_h = 34.0
             pill_r = QRectF(pill_l, cy - pill_h / 2.0, pill_w, pill_h)
@@ -984,11 +984,11 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
 
             for ci, (unit_lbl, max_v, wrap) in enumerate(self._specs):
                 col_l = pill_l + ci * col_w
-                # Number sits slightly left-of-center in its column, unit label right beside it
-                num_w = col_w * 0.48
-                num_x = col_l + 6.0
-                unit_x = num_x + num_w + 5.0
-                unit_w = max(24.0, col_w - num_w - 14.0)
+                # Generous spacing: right-aligned 2-digit number + crisp gap + unit label
+                num_w = 46.0
+                num_x = col_l + 14.0
+                unit_x = num_x + num_w + 7.0
+                unit_w = max(44.0, col_w - (unit_x - col_l) - 6.0)
 
                 disp_v = self._disp[ci]
                 center_int = int(round(disp_v))
