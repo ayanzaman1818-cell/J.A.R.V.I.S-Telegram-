@@ -500,7 +500,7 @@ def _select_relevant_tools_for_local(user_query: str, all_schemas: list[dict[str
         (("email", "gmail", "inbox", "mail", "send"), ("gmail_search", "gmail_read", "gmail_prepare_email", "confirm_action", "web_search")),
         (("drive", "doc", "file"), ("drive_search", "drive_create_text_prepare", "confirm_action")),
         (("search", "look up", "google", "news", "web", "price", "cost", "worth", "about", "latest", "release", "game", "movie"), ("web_search", "tech_news", "price_lookup", "read_page")),
-        (("screen", "window", "click", "type", "desktop", "open", "launch", "pc", "volume", "mute", "lock", "battery", "screenshot", "clipboard"), ("see_screen", "pc_status", "pc_screenshot", "pc_launch_app", "pc_media_control", "pc_lock", "pc_clipboard_get", "pc_clipboard_set", "desktop_click", "desktop_type")),
+        (("screen", "monitor", "look", "seeing", "window", "click", "type", "desktop", "open", "launch", "pc", "volume", "mute", "lock", "battery", "screenshot", "clipboard"), ("see_screen", "pc_status", "pc_screenshot", "pc_launch_app", "pc_media_control", "pc_lock", "pc_clipboard_get", "pc_clipboard_set", "desktop_click", "desktop_type")),
         (("spotify", "music", "song", "play", "pause", "skip", "next", "previous", "track", "resume"), ("spotify_play", "spotify_status", "pc_media_control")),
         (("connect", "composio", "github", "notion", "slack", "discord", "trello"), ("composio_list_connections", "composio_connect_app", "composio_execute_action")),
         (("remember", "memory", "forget"), ("remember", "list_memories", "forget_memory")),
@@ -873,24 +873,47 @@ async def chat(
         config.LLM_DEEP_MODEL if len(user_text) > 600 else config.LLM_FAST_MODEL
     )
 
+    has_visual_media = bool(
+        media_bytes
+        and mime_type
+        and (mime_type.startswith("image/") or mime_type.startswith("video/"))
+    )
+
     if is_local_model(model):
-        try:
-            return await _generate_local_openai(
-                model,
-                messages,
-                use_tools=use_tools,
-                timeout=float(config.LLM_TIMEOUT_SECONDS),
+        # Automatic Vision Bridge: text-only local models (e.g. JARVIS-Qwen-7B) cannot read screenshots/images.
+        # Seamlessly route visual turns (see_screen, Auto-See Screen, dropped images) to Gemini Vision,
+        # then stay on your local model for all regular turns!
+        if has_visual_media and get_client() is not None:
+            vision_model = (
+                config.LLM_FALLBACK_MODEL
+                if (config.LLM_FALLBACK_MODEL and not is_local_model(config.LLM_FALLBACK_MODEL))
+                else "gemini-3.5-flash-lite"
             )
-        except Exception as local_err:
-            log.warning(
-                "Local LLM (%s) failed (%s); falling back to %s",
+            log.info(
+                "Auto Vision Bridge: routing visual turn (%s) from local %s -> %s",
+                mime_type,
                 model,
-                local_err,
-                config.LLM_FALLBACK_MODEL,
+                vision_model,
             )
-            if not config.LLM_FALLBACK_MODEL or is_local_model(config.LLM_FALLBACK_MODEL):
-                raise
-            model = config.LLM_FALLBACK_MODEL
+            model = vision_model
+        else:
+            try:
+                return await _generate_local_openai(
+                    model,
+                    messages,
+                    use_tools=use_tools,
+                    timeout=float(config.LLM_TIMEOUT_SECONDS),
+                )
+            except Exception as local_err:
+                log.warning(
+                    "Local LLM (%s) failed (%s); falling back to %s",
+                    model,
+                    local_err,
+                    config.LLM_FALLBACK_MODEL,
+                )
+                if not config.LLM_FALLBACK_MODEL or is_local_model(config.LLM_FALLBACK_MODEL):
+                    raise
+                model = config.LLM_FALLBACK_MODEL
 
     if get_client() is None:
         raise RuntimeError(
