@@ -2418,9 +2418,9 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
         p.drawArc(dial_r, 90 * 16, int(round(span_deg * 16.0)))
         # Small top timer crown notch
         p.drawLine(QPointF(cx - r * 0.36, bc_y - r - 1.8), QPointF(cx + r * 0.36, bc_y - r - 1.8))
-        # 60fps clockwise rotating hand matching remaining seconds on the 60s dial
-        sec_frac = ((60.0 - (exact_sec % 60.0)) % 60.0) / 60.0
-        angle = -math.pi / 2.0 + 2.0 * math.pi * sec_frac
+        # 60fps hand locked to the EXACT tip of the countdown arc — both sweep anti-clockwise back to 12 o'clock in 1:1 lockstep!
+        clamped_f = max(0.0, min(1.0, frac))
+        angle = -math.pi / 2.0 + 2.0 * math.pi * clamped_f
         hx = cx + math.cos(angle) * (r * 0.66)
         hy = bc_y + math.sin(angle) * (r * 0.66)
         p.setPen(QPen(orange, 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
