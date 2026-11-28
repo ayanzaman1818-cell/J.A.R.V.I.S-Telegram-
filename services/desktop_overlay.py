@@ -1327,6 +1327,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
         QMenu,
         QPushButton,
         QScrollArea,
+        QSizePolicy,
         QStackedWidget,
         QTextBrowser,
         QVBoxLayout,
