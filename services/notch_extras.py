@@ -1342,6 +1342,79 @@ def toggle_default_mic_mute() -> bool:
     return _mic_endpoint_mute(toggle=True)
 
 
+class MicPeakMeter:
+    """Zero-interference 60fps Windows CoreAudio IAudioMeterInformation meter on default microphone (eCapture)."""
+
+    def __init__(self) -> None:
+        self._meter: Any = None
+        self._get_peak_fn: Any = None
+        self._init_attempted: float = 0.0
+
+    def _ensure_init(self) -> bool:
+        if self._get_peak_fn is not None:
+            return True
+        now = time.time()
+        if now - self._init_attempted < 3.0:
+            return False
+        self._init_attempted = now
+        if os.name != "nt":
+            return False
+        try:
+            from ctypes import POINTER, byref, c_float, c_int, c_uint, c_void_p, HRESULT
+
+            ole32 = ctypes.windll.ole32
+            ole32.CoInitialize(None)
+            clsid = _GUID.from_str("BCDE0395-E52F-467C-8E3D-C4579291692E")
+            iid_enum = _GUID.from_str("A95664D2-9614-4F35-A746-DE8DB63617E6")
+            iid_meter = _GUID.from_str("C02216F6-8C67-4B5B-9D00-D008E73E0064")
+
+            enum_p = c_void_p()
+            if ole32.CoCreateInstance(byref(clsid), None, 23, byref(iid_enum), byref(enum_p)) != 0 or not enum_p:
+                return False
+            vt = ctypes.cast(ctypes.cast(enum_p, POINTER(c_void_p))[0], POINTER(c_void_p))
+            get_def = ctypes.WINFUNCTYPE(HRESULT, c_void_p, c_int, c_int, POINTER(c_void_p))(vt[4])
+            rel_enum = ctypes.WINFUNCTYPE(ctypes.c_ulong, c_void_p)(vt[2])
+
+            dev_p = c_void_p()
+            # Try eCommunications (2) first for call mics, fall back to eConsole (0)
+            hr = get_def(enum_p, 1, 2, byref(dev_p))
+            if hr != 0 or not dev_p:
+                hr = get_def(enum_p, 1, 0, byref(dev_p))
+            rel_enum(enum_p)
+            if hr != 0 or not dev_p:
+                return False
+
+            dvt = ctypes.cast(ctypes.cast(dev_p, POINTER(c_void_p))[0], POINTER(c_void_p))
+            act = ctypes.WINFUNCTYPE(HRESULT, c_void_p, POINTER(_GUID), c_uint, c_void_p, POINTER(c_void_p))(dvt[3])
+            rel_dev = ctypes.WINFUNCTYPE(ctypes.c_ulong, c_void_p)(dvt[2])
+
+            meter_p = c_void_p()
+            hr = act(dev_p, byref(iid_meter), 23, None, byref(meter_p))
+            rel_dev(dev_p)
+            if hr != 0 or not meter_p:
+                return False
+
+            mvt = ctypes.cast(ctypes.cast(meter_p, POINTER(c_void_p))[0], POINTER(c_void_p))
+            self._meter = meter_p
+            self._get_peak_fn = ctypes.WINFUNCTYPE(HRESULT, c_void_p, POINTER(c_float))(mvt[3])
+            return True
+        except Exception:
+            return False
+
+    def get_peak(self) -> float:
+        """Return live microphone linear peak amplitude (0.0..1.0) in <0.1ms."""
+        if not self._ensure_init():
+            return 0.0
+        try:
+            pk = ctypes.c_float(0.0)
+            if self._get_peak_fn(self._meter, ctypes.byref(pk)) == 0:
+                return max(0.0, min(1.0, float(pk.value)))
+        except Exception:
+            self._meter = None
+            self._get_peak_fn = None
+        return 0.0
+
+
 class CallActivityTracker:
     """Detects active Discord / Google Meet / Zoom / Teams calls when the microphone is live."""
 

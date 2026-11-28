@@ -397,6 +397,7 @@ class DesktopOverlayService:
             BrightnessTracker,
             CallActivityTracker,
             DownloadsWatcher,
+            MicPeakMeter,
             NetworkTracker,
             PrivacyIndicatorTracker,
             SyncedLyricsTracker,
@@ -412,6 +413,7 @@ class DesktopOverlayService:
         self._network_tracker = NetworkTracker()
         self._bt_tracker = BluetoothTracker()
         self._call_tracker = CallActivityTracker()
+        self._mic_meter = MicPeakMeter()
         self._now_playing_state: dict[str, Any] = {
             "playing": False,
             "track": "No song playing right now",
@@ -2613,6 +2615,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._call_dur: str = ""
             self._call_muted: bool = False
             self._call_phase: float = 0.0
+            self._call_bars: list[float] = [0.18, 0.18, 0.18, 0.18, 0.18]
             self._hover_call_mute_rect: Any = None
             self._hover_call_mute_hit: bool = False
             self._color_hex: str = ""
@@ -3053,7 +3056,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             except Exception:
                 pass
 
-            # Active Call (Discord / Meet / Zoom / Teams) Pill
+            # Active Call (Discord / Meet / Zoom / Teams) Pill + Real-Time 60fps Voice-Synced Mic Waveform
             try:
                 c_st = self.service._call_tracker.update(new_mic)
                 self._call_active = bool(c_st.get("active"))
@@ -3061,7 +3064,21 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._call_dur = str(c_st.get("duration") or "")
                 self._call_muted = bool(c_st.get("muted"))
                 if self._call_active:
-                    self._call_phase = (self._call_phase + 0.14) % 1000.0
+                    mic_pk = 0.0 if self._call_muted else float(self.service._mic_meter.get_peak())
+                    if mic_pk > 1e-4:
+                        mic_db = 20.0 * math.log10(mic_pk)
+                        v_lvl = max(0.0, min(1.0, (mic_db + 48.0) / 44.0))
+                    else:
+                        v_lvl = 0.0
+                    self._call_phase = (self._call_phase + 0.14 + v_lvl * 0.28) % 1000.0
+                    c_shapes = (0.62, 0.90, 1.00, 0.88, 0.58)
+                    c_offs = (0.0, 1.2, 2.4, 0.8, 2.0)
+                    for i in range(len(self._call_bars)):
+                        w_mod = 0.45 + 0.55 * abs(math.sin(self._call_phase * (1.05 + i * 0.18) + c_offs[i]))
+                        tgt = max(0.16, min(1.0, v_lvl * c_shapes[i] * w_mod)) if v_lvl > 0.03 else 0.16
+                        prev_b = self._call_bars[i]
+                        # Snappy voice attack, smooth natural decay
+                        self._call_bars[i] = (prev_b * 0.32 + tgt * 0.68) if tgt > prev_b else (prev_b * 0.72 + tgt * 0.28)
             except Exception:
                 pass
 
@@ -3653,6 +3670,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     float(getattr(self, "_call_phase", 0.0)),
                     hovered=(self.state == "hover"),
                     mute_hit=bool(getattr(self, "_hover_call_mute_hit", False)),
+                    voice_bars=getattr(self, "_call_bars", None),
                 )
                 p.restore()
             elif self.state in ("idle", "hover") and getattr(self, "_music_playing_active", False) and nh >= 13:

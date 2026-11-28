@@ -379,6 +379,7 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
         phase: float,
         hovered: bool = False,
         mute_hit: bool = False,
+        voice_bars: Optional[list[float]] = None,
     ) -> Optional[QRectF]:
         """Draw iPhone Dynamic Island-style Active Call pill:
         Left: Green phone handset icon + live duration | Right: Pulsing green waveform (+ Mute Mic button on hover).
@@ -451,10 +452,15 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
         shapes = (0.62, 0.90, 1.00, 0.88, 0.58)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(col)
-        max_bh = 12.0 if hovered else 10.5
+        max_bh = 12.5 if hovered else 11.0
         for i in range(n_bars):
-            amp = 0.22 if muted else (0.32 + 0.68 * abs(math.sin(phase * (1.15 + i * 0.28) + i * 1.15)))
-            bh = max(2.4, min(max_bh, amp * shapes[i] * max_bh))
+            if muted:
+                bh = 2.2
+            elif voice_bars and i < len(voice_bars):
+                bh = max(2.2, min(max_bh, float(voice_bars[i]) * max_bh))
+            else:
+                amp = 0.22 + 0.78 * abs(math.sin(phase * (1.15 + i * 0.28) + i * 1.15))
+                bh = max(2.2, min(max_bh, amp * shapes[i] * max_bh))
             p.drawRoundedRect(QRectF(wave_x + i * (bar_w + gap), cy - bh / 2.0, bar_w, bh), 1.1, 1.1)
 
         return mute_rect
