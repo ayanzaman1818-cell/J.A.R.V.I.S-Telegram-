@@ -2418,8 +2418,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
         p.drawArc(dial_r, 90 * 16, int(round(span_deg * 16.0)))
         # Small top timer crown notch
         p.drawLine(QPointF(cx - r * 0.36, bc_y - r - 1.8), QPointF(cx + r * 0.36, bc_y - r - 1.8))
-        # 60fps rotating hand matching exact remaining seconds on the 60s dial
-        sec_frac = (exact_sec % 60.0) / 60.0
+        # 60fps clockwise rotating hand matching remaining seconds on the 60s dial
+        sec_frac = ((60.0 - (exact_sec % 60.0)) % 60.0) / 60.0
         angle = -math.pi / 2.0 + 2.0 * math.pi * sec_frac
         hx = cx + math.cos(angle) * (r * 0.66)
         hy = bc_y + math.sin(angle) * (r * 0.66)

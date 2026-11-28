@@ -33,6 +33,7 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
         QPainterPath,
         QPen,
         QPixmap,
+        QPolygonF,
     )
     from PySide6.QtWidgets import (
         QApplication,
@@ -784,7 +785,313 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
             p.restore()
 
     # ------------------------------------------------------------------
-    # 5. Notch Utility Hub Page (Shelf | Clipboard | Mirror | Timer)
+    # 4b. iPhone-Style 3-Dial 2D Timer Wheel with Mechanical Tick Sound
+    # ------------------------------------------------------------------
+
+    def _build_ios_tick_wav() -> bytes:
+        """Synthesize a crisp ~8ms iOS picker wheel mechanical tick as an in-memory PCM WAV."""
+        import struct
+        sr = 22050
+        n_samples = int(sr * 0.0085)
+        pcm = bytearray()
+        for i in range(n_samples):
+            t = i / sr
+            # Crisp tactile woody click: damped 1450Hz transient + soft 420Hz body
+            env_hi = math.exp(-t / 0.0012)
+            env_lo = math.exp(-t / 0.0022)
+            s = 0.62 * math.sin(2.0 * math.pi * 1450.0 * t) * env_hi + 0.38 * math.sin(2.0 * math.pi * 420.0 * t) * env_lo
+            val = max(-32767, min(32767, int(s * 9600.0)))
+            pcm.extend(struct.pack("<h", val))
+        data_sz = len(pcm)
+        hdr = struct.pack(
+            "<4sI4s4sIHHIIHH4sI",
+            b"RIFF", 36 + data_sz, b"WAVE",
+            b"fmt ", 16, 1, 1, sr, sr * 2, 2, 16,
+            b"data", data_sz,
+        )
+        return hdr + bytes(pcm)
+
+    _IOS_TICK_WAV = _build_ios_tick_wav()
+
+    def _play_ios_tick() -> None:
+        if os.name != "nt":
+            return
+        try:
+            import winsound
+            winsound.PlaySound(
+                _IOS_TICK_WAV,
+                winsound.SND_MEMORY | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
+            )
+        except Exception:
+            pass
+
+    class _IPhoneTimerWheel(QWidget):
+        """iPhone-style 2D 3-dial scroll picker (hours | min | sec) with crisp tick sounds per step."""
+
+        def __init__(self, parent: Optional[QWidget] = None) -> None:
+            super().__init__(parent)
+            self.setFixedHeight(136)
+            self.setMouseTracking(True)
+            self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+            # (label, max_val, wrap, default_val)
+            self._specs = (
+                ("hours", 23, False),
+                ("min", 59, True),
+                ("sec", 59, True),
+            )
+            self._vals: list[int] = [0, 15, 0]
+            self._disp: list[float] = [0.0, 15.0, 0.0]
+            self._drag_col: int = -1
+            self._drag_last_y: float = 0.0
+            self._drag_accum: float = 0.0
+            self._drag_moved: bool = False
+
+            self._anim_timer = QTimer(self)
+            self._anim_timer.setInterval(16)
+            self._anim_timer.timeout.connect(self._tick_anim)
+
+        def total_seconds(self) -> int:
+            return self._vals[0] * 3600 + self._vals[1] * 60 + self._vals[2]
+
+        def formatted_label(self) -> str:
+            h, m, s = self._vals
+            parts = []
+            if h > 0:
+                parts.append(f"{h}h")
+            if m > 0:
+                parts.append(f"{m}m")
+            if s > 0 or not parts:
+                parts.append(f"{s}s")
+            return " ".join(parts) + " Timer"
+
+        def _col_at_x(self, x: float) -> int:
+            w = max(1.0, float(self.width()))
+            # Center 3 columns inside the horizontal pill area
+            pad = max(12.0, (w - 360.0) / 2.0)
+            col_w = (w - pad * 2.0) / 3.0
+            idx = int((x - pad) / max(1.0, col_w))
+            return max(0, min(2, idx))
+
+        def _step_col(self, col: int, delta: int) -> None:
+            if delta == 0:
+                return
+            _lbl, max_v, wrap = self._specs[col]
+            old_v = self._vals[col]
+            if wrap:
+                span = max_v + 1
+                new_v = (old_v + delta) % span
+                # Adjust display value smoothly across wrap boundary
+                self._disp[col] += (new_v - old_v) - delta
+            else:
+                new_v = max(0, min(max_v, old_v + delta))
+            if new_v != old_v:
+                self._vals[col] = new_v
+                _play_ios_tick()
+                if not self._anim_timer.isActive():
+                    self._anim_timer.start()
+                self.update()
+
+        def _tick_anim(self) -> None:
+            moving = False
+            for i in range(3):
+                diff = float(self._vals[i]) - self._disp[i]
+                if abs(diff) > 0.004:
+                    self._disp[i] += diff * 0.30
+                    moving = True
+                else:
+                    self._disp[i] = float(self._vals[i])
+            self.update()
+            if not moving:
+                self._anim_timer.stop()
+
+        def wheelEvent(self, ev: Any) -> None:
+            dy = ev.angleDelta().y()
+            if dy == 0:
+                return
+            col = self._col_at_x(float(ev.position().x()))
+            # Scroll down -> next number (+1), scroll up -> previous number (-1)
+            step = -1 if dy > 0 else 1
+            self._step_col(col, step)
+            ev.accept()
+
+        def mousePressEvent(self, ev: Any) -> None:
+            if ev.button() == Qt.MouseButton.LeftButton:
+                self._drag_col = self._col_at_x(float(ev.position().x()))
+                self._drag_last_y = float(ev.position().y())
+                self._drag_accum = 0.0
+                self._drag_moved = False
+                self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+                ev.accept()
+                return
+            super().mousePressEvent(ev)
+
+        def mouseMoveEvent(self, ev: Any) -> None:
+            if self._drag_col >= 0:
+                y = float(ev.position().y())
+                dy = y - self._drag_last_y
+                self._drag_last_y = y
+                self._drag_accum += dy
+                step_px = 24.0
+                while self._drag_accum <= -step_px:
+                    self._drag_accum += step_px
+                    self._drag_moved = True
+                    self._step_col(self._drag_col, 1)
+                while self._drag_accum >= step_px:
+                    self._drag_accum -= step_px
+                    self._drag_moved = True
+                    self._step_col(self._drag_col, -1)
+                ev.accept()
+                return
+            super().mouseMoveEvent(ev)
+
+        def mouseReleaseEvent(self, ev: Any) -> None:
+            if self._drag_col >= 0:
+                col = self._drag_col
+                was_drag = self._drag_moved
+                self._drag_col = -1
+                self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+                if not was_drag:
+                    # Single click above or below the center pill steps by -1 / +1
+                    cy = self.height() / 2.0
+                    y = float(ev.position().y())
+                    if y < cy - 17.0:
+                        self._step_col(col, -1)
+                    elif y > cy + 17.0:
+                        self._step_col(col, 1)
+                ev.accept()
+                return
+            super().mouseReleaseEvent(ev)
+
+        def paintEvent(self, _ev: Any) -> None:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            w = float(self.width())
+            h = float(self.height())
+            cy = h / 2.0
+
+            pill_w = min(w - 20.0, 368.0)
+            pill_l = (w - pill_w) / 2.0
+            pill_h = 34.0
+            pill_r = QRectF(pill_l, cy - pill_h / 2.0, pill_w, pill_h)
+
+            # Iconic iPhone translucent rounded selection bar across all 3 dials
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(255, 255, 255, 26))
+            p.drawRoundedRect(pill_r, 12.0, 12.0)
+
+            col_w = pill_w / 3.0
+            row_step = 28.0
+
+            for ci, (unit_lbl, max_v, wrap) in enumerate(self._specs):
+                col_l = pill_l + ci * col_w
+                # Number sits slightly left-of-center in its column, unit label right beside it
+                num_w = col_w * 0.48
+                num_x = col_l + 6.0
+                unit_x = num_x + num_w + 5.0
+                unit_w = max(24.0, col_w - num_w - 14.0)
+
+                disp_v = self._disp[ci]
+                center_int = int(round(disp_v))
+                span = max_v + 1
+
+                p.save()
+                p.setClipRect(QRectF(col_l, 2.0, col_w, h - 4.0))
+                for offset in (-2, -1, 0, 1, 2):
+                    raw_i = center_int + offset
+                    if wrap:
+                        val_i = raw_i % span
+                    else:
+                        if raw_i < 0 or raw_i > max_v:
+                            continue
+                        val_i = raw_i
+                    delta = float(raw_i) - disp_v
+                    abs_d = abs(delta)
+                    if abs_d > 2.35:
+                        continue
+                    ny = cy + delta * row_step
+                    # Smooth iOS 2D vertical roll-off in opacity & size
+                    alpha_f = max(0.0, 1.0 - (abs_d / 2.25) ** 1.35)
+                    alpha_i = int(round(255.0 * alpha_f))
+                    f_sz = max(11.0, 18.5 - abs_d * 2.8)
+                    weight = QFont.Weight.DemiBold if abs_d < 0.45 else QFont.Weight.Medium
+                    f = QFont("SF Pro Display")
+                    f.setPointSizeF(f_sz)
+                    f.setWeight(weight)
+                    p.setFont(f)
+                    if abs_d < 0.45:
+                        p.setPen(QColor(255, 255, 255, alpha_i))
+                    else:
+                        p.setPen(QColor(186, 196, 212, int(alpha_i * 0.72)))
+                    p.drawText(
+                        QRectF(num_x, ny - 15.0, num_w, 30.0),
+                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                        str(val_i),
+                    )
+                p.restore()
+
+                # Fixed crisp unit label ('hours' / 'min' / 'sec') inside the center selection bar
+                uf = QFont("SF Pro Display", 11, QFont.Weight.DemiBold)
+                p.setFont(uf)
+                p.setPen(QColor(241, 245, 249, 235))
+                p.drawText(
+                    QRectF(unit_x, cy - 15.0, unit_w, 30.0),
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    unit_lbl,
+                )
+
+    class _CircularTimerActionBtn(QWidget):
+        """Hand-drawn circular iOS Play (green) or Cancel/Stop (x) vector button."""
+
+        clicked = Signal()
+
+        def __init__(self, kind: str = "play", size: int = 34, parent: Optional[QWidget] = None) -> None:
+            super().__init__(parent)
+            self._kind = kind
+            self._hovered = False
+            self.setFixedSize(size, size)
+            self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+
+        def enterEvent(self, ev: Any) -> None:
+            self._hovered = True
+            self.update()
+            super().enterEvent(ev)
+
+        def leaveEvent(self, ev: Any) -> None:
+            self._hovered = False
+            self.update()
+            super().leaveEvent(ev)
+
+        def mousePressEvent(self, ev: Any) -> None:
+            if ev.button() == Qt.MouseButton.LeftButton:
+                self.clicked.emit()
+                return
+            super().mousePressEvent(ev)
+
+        def paintEvent(self, _ev: Any) -> None:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            r = QRectF(1.0, 1.0, self.width() - 2.0, self.height() - 2.0)
+            cx, cy = r.center().x(), r.center().y()
+            p.setPen(Qt.PenStyle.NoPen)
+            if self._kind == "play":
+                p.setBrush(QColor(48, 209, 88, 92 if self._hovered else 54))
+                p.drawEllipse(r)
+                p.setBrush(QColor("#ffffff" if self._hovered else "#30d158"))
+                tri = QPolygonF([
+                    QPointF(cx - 4.0, cy - 6.2),
+                    QPointF(cx - 4.0, cy + 6.2),
+                    QPointF(cx + 6.8, cy),
+                ])
+                p.drawPolygon(tri)
+            else:
+                p.setBrush(QColor(255, 69, 58, 92 if self._hovered else 42))
+                p.drawEllipse(r)
+                p.setPen(QPen(QColor("#ffffff" if self._hovered else "#ff6961"), 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(cx - 4.5, cy - 4.5), QPointF(cx + 4.5, cy + 4.5))
+                p.drawLine(QPointF(cx + 4.5, cy - 4.5), QPointF(cx - 4.5, cy + 4.5))
+
+    # ------------------------------------------------------------------
+    # 5. Notch Utility Hub Page (Shelf | Clip | Mirror | Timer | Notes | Tools)
     # ------------------------------------------------------------------
 
     class NotchToolsPage(QWidget):
@@ -1026,46 +1333,39 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
             vl.addWidget(self._mirror, stretch=1)
             return w
 
-        # --- Tab 3: Quick Pomodoro / Notch Timer Creator ---
+        # --- Tab 3: iPhone-Style 3-Dial 2D Timer Wheel + Bottom Play / Stop Controls ---
         def _build_timer_tab(self) -> QWidget:
             w = QWidget()
             vl = QVBoxLayout(w)
-            vl.setContentsMargins(6, 6, 6, 6)
-            vl.setSpacing(10)
+            vl.setContentsMargins(6, 0, 6, 4)
+            vl.setSpacing(6)
             vl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-            hdr = QLabel("Quick Focus Timer — runs live with the 60fps orange notch dial")
-            hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            hdr.setStyleSheet("color: #ff9f0a; font-size: 11.5px; font-weight: 700; background: transparent;")
-            vl.addWidget(hdr)
+            self._timer_wheel = _IPhoneTimerWheel()
+            vl.addWidget(self._timer_wheel)
 
-            presets_row = QHBoxLayout()
-            presets_row.setSpacing(8)
-            presets_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            for mins, lbl in ((5, "5m Break"), (10, "10m Quick"), (15, "15m Sprint"), (25, "25m Focus"), (45, "45m Deep")):
-                b = QPushButton(lbl)
-                b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-                b.setFixedHeight(36)
-                b.setStyleSheet(
-                    "QPushButton { background: rgba(255,159,10,0.14); color: #ff9f0a; border: none; "
-                    "border-radius: 12px; padding: 0 12px; font-size: 11.5px; font-weight: 800; }"
-                    "QPushButton:hover { background: rgba(255,159,10,0.28); color: #ffffff; }"
-                )
-                b.clicked.connect(lambda _c=False, m=mins, lb=lbl: self.start_quick_timer.emit(m * 60, lb))
-                presets_row.addWidget(b)
-            vl.addLayout(presets_row)
+            btn_row = QHBoxLayout()
+            btn_row.setSpacing(14)
+            btn_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-            btn_stop = QPushButton("Stop Active Notch Timer")
-            btn_stop.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            btn_stop.setFixedSize(186, 28)
-            btn_stop.setStyleSheet(
-                "QPushButton { background: rgba(248,113,113,0.14); color: #f87171; border: none; "
-                "border-radius: 12px; font-size: 11px; font-weight: 700; }"
-                "QPushButton:hover { background: rgba(248,113,113,0.28); color: #ffffff; }"
-            )
+            btn_stop = _CircularTimerActionBtn("stop", size=34)
+            btn_stop.setToolTip("Cancel active timer")
             btn_stop.clicked.connect(self.stop_quick_timer.emit)
-            vl.addWidget(btn_stop, alignment=Qt.AlignmentFlag.AlignHCenter)
+            btn_row.addWidget(btn_stop)
+
+            btn_play = _CircularTimerActionBtn("play", size=36)
+            btn_play.setToolTip("Start timer")
+            btn_play.clicked.connect(self._on_wheel_start)
+            btn_row.addWidget(btn_play)
+
+            vl.addLayout(btn_row)
             return w
+
+        def _on_wheel_start(self) -> None:
+            secs = self._timer_wheel.total_seconds()
+            if secs <= 0:
+                return
+            self.start_quick_timer.emit(secs, self._timer_wheel.formatted_label())
 
         # --- Tab 4: Persistent Quick Sticky Note / Scratchpad ---
         def _scratchpad_path(self) -> Path:

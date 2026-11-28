@@ -213,7 +213,7 @@ class WindowsClockTracker:
 
     def start_quick_timer(self, seconds: int, label: str = "Focus Timer") -> None:
         """Start a built-in Notch Pomodoro / Quick Timer (uses the exact same 60fps orange icon!)."""
-        sec = max(5, int(seconds))
+        sec = max(1, int(seconds))
         with self._lock:
             self._local_timer_total = float(sec)
             self._local_timer_due = time.time() + float(sec)
