@@ -4505,65 +4505,30 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._dash_week_num_lbls.append(nl)
             cal_col.addLayout(week_row)
 
-            # Freed center space: Instant 1-Click Quick Focus Timers (5m / 15m / 25m) + Mirror & Clipboard pills!
+            # Clean 4-pill quick bar sized cleanly for the center calendar column (zero clipping or overlap!)
             quick_row = QHBoxLayout()
-            quick_row.setSpacing(4)
+            quick_row.setSpacing(6)
             quick_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            for mins, lbl in ((5, "5m"), (15, "15m"), (25, "25m")):
-                tb = QPushButton(lbl)
-                tb.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-                tb.setFixedHeight(20)
-                tb.setToolTip(f"Start a {mins}-minute orange focus timer in the notch")
-                tb.setStyleSheet(
-                    "QPushButton { background: rgba(255,159,10,0.14); color: #ff9f0a; border: none; "
-                    "border-radius: 7px; padding: 0 7px; font-size: 9.5px; font-weight: 800; }"
-                    "QPushButton:hover { background: rgba(255,159,10,0.28); color: #ffffff; }"
-                )
-                tb.clicked.connect(lambda _c=False, m=mins: self._on_start_quick_timer(m * 60, f"{m}m Focus"))
-                quick_row.addWidget(tb)
 
-            for tab_i, lbl, tip, min_w in (
-                (2, "Mirror", "Open live full-notch Webcam Mirror", 42),
-                (1, "Clip", "Open Clipboard History", 30),
-            ):
+            quick_specs = (
+                ("Timer", "Open iPhone 3-dial Timer wheel", "#ff9f0a", "rgba(255,159,10,0.16)", "rgba(255,159,10,0.30)", lambda: self._open_tools_hub(3)),
+                ("Mirror", "Open live full-notch Webcam Mirror", "#cbd5e1", "rgba(255,255,255,0.09)", "rgba(56,189,248,0.24)", lambda: self._open_tools_hub(2)),
+                ("Snip", "Snip any screen region -> copy & Ask J.A.R.V.I.S.", "#c084fc", "rgba(168,85,247,0.16)", "rgba(168,85,247,0.30)", self._launch_screen_snip),
+                ("Focus", "1-click Focus Mode: 25m Pomodoro + silence toasts", "#30d158", "rgba(48,209,88,0.15)", "rgba(48,209,88,0.28)", self._toggle_focus_mode),
+            )
+            for lbl, tip, fg, bg, bg_h, cb in quick_specs:
                 qb = QPushButton(lbl)
                 qb.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-                qb.setFixedHeight(20)
-                qb.setMinimumWidth(min_w)
+                qb.setFixedHeight(21)
+                qb.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
                 qb.setToolTip(tip)
                 qb.setStyleSheet(
-                    "QPushButton { background: rgba(255,255,255,0.08); color: #cbd5e1; border: none; "
-                    "border-radius: 7px; padding: 0 5px; font-size: 9px; font-weight: 700; }"
-                    "QPushButton:hover { background: rgba(56,189,248,0.22); color: #ffffff; }"
+                    f"QPushButton {{ background: {bg}; color: {fg}; border: none; "
+                    "border-radius: 8px; padding: 0 9px; font-size: 9.5px; font-weight: 800; }"
+                    f"QPushButton:hover {{ background: {bg_h}; color: #ffffff; }}"
                 )
-                qb.clicked.connect(lambda _c=False, ti=tab_i: self._open_tools_hub(ti))
+                qb.clicked.connect(cb)
                 quick_row.addWidget(qb)
-
-            btn_snip = QPushButton("Snip")
-            btn_snip.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            btn_snip.setFixedHeight(20)
-            btn_snip.setMinimumWidth(34)
-            btn_snip.setToolTip("Snip any screen region -> copy & Ask J.A.R.V.I.S.")
-            btn_snip.setStyleSheet(
-                "QPushButton { background: rgba(168,85,247,0.16); color: #c084fc; border: none; "
-                "border-radius: 7px; padding: 0 5px; font-size: 9px; font-weight: 800; }"
-                "QPushButton:hover { background: rgba(168,85,247,0.30); color: #ffffff; }"
-            )
-            btn_snip.clicked.connect(self._launch_screen_snip)
-            quick_row.addWidget(btn_snip)
-
-            btn_focus = QPushButton("Focus")
-            btn_focus.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            btn_focus.setFixedHeight(20)
-            btn_focus.setMinimumWidth(38)
-            btn_focus.setToolTip("1-click Focus Mode: 25m Pomodoro + silence notch toasts")
-            btn_focus.setStyleSheet(
-                "QPushButton { background: rgba(48,209,88,0.14); color: #30d158; border: none; "
-                "border-radius: 7px; padding: 0 5px; font-size: 9px; font-weight: 800; }"
-                "QPushButton:hover { background: rgba(48,209,88,0.28); color: #ffffff; }"
-            )
-            btn_focus.clicked.connect(self._toggle_focus_mode)
-            quick_row.addWidget(btn_focus)
             cal_col.addLayout(quick_row)
 
             ev_row = QHBoxLayout()
