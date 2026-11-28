@@ -788,19 +788,34 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
     # 4b. iPhone-Style 3-Dial 2D Timer Wheel with Mechanical Tick Sound
     # ------------------------------------------------------------------
 
-    def _build_ios_tick_wav() -> bytes:
-        """Synthesize a crisp ~8ms iOS picker wheel mechanical tick as an in-memory PCM WAV."""
+    def _ensure_ios_tick_wav_file() -> Path:
+        """Synthesize a crisp, audible iOS picker wheel tactile click WAV (44.1kHz, 16-bit mono) to .cache."""
         import struct
-        sr = 22050
-        n_samples = int(sr * 0.0085)
+        wav_path = Path(__file__).resolve().parent.parent / ".cache" / "ios_wheel_tick_v2.wav"
+        wav_path.parent.mkdir(parents=True, exist_ok=True)
+        sr = 44100
+        # 55ms total buffer (14ms crisp tactile click + 41ms tail so Windows audio never swallows short transients)
+        n_samples = int(sr * 0.055)
         pcm = bytearray()
+        rng_state = 0x12345678
         for i in range(n_samples):
             t = i / sr
-            # Crisp tactile woody click: damped 1450Hz transient + soft 420Hz body
-            env_hi = math.exp(-t / 0.0012)
-            env_lo = math.exp(-t / 0.0022)
-            s = 0.62 * math.sin(2.0 * math.pi * 1450.0 * t) * env_hi + 0.38 * math.sin(2.0 * math.pi * 420.0 * t) * env_lo
-            val = max(-32767, min(32767, int(s * 9600.0)))
+            if t < 0.016:
+                # Tiny LCG deterministic white-noise attack burst (~1.2ms) for real mechanical detent feel
+                rng_state = (1103515245 * rng_state + 12345) & 0x7FFFFFFF
+                noise = ((rng_state / 0x3FFFFFFF) - 1.0) * math.exp(-t / 0.0007)
+                # Crisp woody iPhone Taptic/picker resonance: 1750Hz click + 680Hz body + 3100Hz snap
+                click = (
+                    0.50 * math.sin(2.0 * math.pi * 1750.0 * t) * math.exp(-t / 0.0024)
+                    + 0.32 * math.sin(2.0 * math.pi * 680.0 * t) * math.exp(-t / 0.0036)
+                    + 0.18 * math.sin(2.0 * math.pi * 3100.0 * t) * math.exp(-t / 0.0011)
+                    + 0.25 * noise
+                )
+                # Fast 0.25ms smooth ramp-in to prevent speaker pop
+                fade_in = min(1.0, t / 0.00025)
+                val = max(-32767, min(32767, int(click * fade_in * 24500.0)))
+            else:
+                val = 0
             pcm.extend(struct.pack("<h", val))
         data_sz = len(pcm)
         hdr = struct.pack(
@@ -809,21 +824,47 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
             b"fmt ", 16, 1, 1, sr, sr * 2, 2, 16,
             b"data", data_sz,
         )
-        return hdr + bytes(pcm)
+        wav_path.write_bytes(hdr + bytes(pcm))
+        return wav_path
 
-    _IOS_TICK_WAV = _build_ios_tick_wav()
+    _IOS_TICK_PATH = _ensure_ios_tick_wav_file()
+    _TICK_POOL: list[Any] = []
+    _TICK_POOL_IDX = [0]
 
-    def _play_ios_tick() -> None:
-        if os.name != "nt":
+    def _preload_ios_tick() -> None:
+        if _TICK_POOL:
             return
         try:
-            import winsound
-            winsound.PlaySound(
-                _IOS_TICK_WAV,
-                winsound.SND_MEMORY | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
-            )
+            from PySide6.QtMultimedia import QSoundEffect
+            url = QUrl.fromLocalFile(str(_IOS_TICK_PATH))
+            for _ in range(4):
+                fx = QSoundEffect()
+                fx.setSource(url)
+                fx.setVolume(0.85)
+                _TICK_POOL.append(fx)
         except Exception:
             pass
+
+    def _play_ios_tick() -> None:
+        """Play zero-latency polyphonic iOS wheel tick via preloaded PySide6 QSoundEffect pool."""
+        try:
+            _preload_ios_tick()
+            if _TICK_POOL:
+                fx = _TICK_POOL[_TICK_POOL_IDX[0] % len(_TICK_POOL)]
+                _TICK_POOL_IDX[0] += 1
+                fx.play()
+                return
+        except Exception:
+            pass
+        if os.name == "nt":
+            try:
+                import winsound
+                winsound.PlaySound(
+                    str(_IOS_TICK_PATH),
+                    winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
+                )
+            except Exception:
+                pass
 
     class _IPhoneTimerWheel(QWidget):
         """iPhone-style 2D 3-dial scroll picker (hours | min | sec) with crisp tick sounds per step."""
@@ -849,6 +890,7 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
             self._anim_timer = QTimer(self)
             self._anim_timer.setInterval(16)
             self._anim_timer.timeout.connect(self._tick_anim)
+            QTimer.singleShot(60, _preload_ios_tick)
 
         def total_seconds(self) -> int:
             return self._vals[0] * 3600 + self._vals[1] * 60 + self._vals[2]
