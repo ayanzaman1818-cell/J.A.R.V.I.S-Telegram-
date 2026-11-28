@@ -2615,7 +2615,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._call_dur: str = ""
             self._call_muted: bool = False
             self._call_phase: float = 0.0
-            self._call_bars: list[float] = [0.18, 0.18, 0.18, 0.18, 0.18]
+            self._call_bars: list[float] = [0.12, 0.12, 0.12, 0.12, 0.12, 0.12]
             self._hover_call_mute_rect: Any = None
             self._hover_call_mute_hit: bool = False
             self._color_hex: str = ""
@@ -3064,27 +3064,24 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._call_dur = str(c_st.get("duration") or "")
                 self._call_muted = bool(c_st.get("muted"))
                 if self._call_active:
+                    # Exact same 6-bar 60fps real-dB visualizer engine as the Music Notch, driven by your live mic!
                     mic_pk = 0.0 if self._call_muted else float(self.service._mic_meter.get_peak())
                     if mic_pk > 1e-4:
                         mic_db = 20.0 * math.log10(mic_pk)
-                        raw_v = max(0.0, min(1.0, (mic_db + 46.0) / 40.0))
+                        v_lvl = max(0.0, min(1.0, (mic_db + 42.0) / 42.0))
                     else:
-                        raw_v = 0.0
-                    # Smooth voice envelope first so raw mic micro-spikes never cause jiggle/vibration
-                    prev_env = getattr(self, "_call_voice_env", 0.0)
-                    v_lvl = (prev_env * 0.58 + raw_v * 0.42) if raw_v > prev_env else (prev_env * 0.84 + raw_v * 0.16)
-                    self._call_voice_env = v_lvl
-
-                    # Calm, fluid wave drift (no rapid abs(sin) vibration!)
-                    self._call_phase = (self._call_phase + 0.045 + v_lvl * 0.055) % 1000.0
-                    c_shapes = (0.58, 0.88, 1.00, 0.86, 0.56)
-                    c_offs = (0.0, 0.85, 1.7, 2.55, 3.4)
+                        v_lvl = 0.0
+                    self._call_phase = (self._call_phase + 0.12 + v_lvl * 0.20) % 1000.0
+                    c_shapes = (0.76, 0.94, 1.00, 0.92, 0.82, 0.70)
+                    c_offs = (0.0, 1.15, 2.35, 0.75, 1.95, 3.15)
                     for i in range(len(self._call_bars)):
-                        w_mod = 0.72 + 0.28 * math.sin(self._call_phase + c_offs[i])
-                        tgt = max(0.18, min(1.0, v_lvl * c_shapes[i] * w_mod)) if v_lvl > 0.04 else 0.18
+                        wave = 0.35 + 0.65 * abs(math.sin(self._call_phase * (0.95 + i * 0.15) + c_offs[i]))
+                        tgt = max(0.08, min(1.0, v_lvl * c_shapes[i] * wave))
                         prev_b = self._call_bars[i]
-                        # Silky fluid glide per bar
-                        self._call_bars[i] = (prev_b * 0.62 + tgt * 0.38) if tgt > prev_b else (prev_b * 0.84 + tgt * 0.16)
+                        if tgt > prev_b:
+                            self._call_bars[i] = prev_b * 0.38 + tgt * 0.62
+                        else:
+                            self._call_bars[i] = prev_b * 0.72 + tgt * 0.28
             except Exception:
                 pass
 

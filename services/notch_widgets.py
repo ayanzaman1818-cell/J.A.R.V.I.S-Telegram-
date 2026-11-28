@@ -417,11 +417,12 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
             dur_text or "0:00",
         )
 
-        # 3. Right: Pulsing 5-bar green waveform (+ circular Mute Mic button on hover)
+        # 3. Right: Exact 6-bar Music Notch visualizer style in green (+ circular Mute Mic button on hover)
         mute_rect: Optional[QRectF] = None
-        bar_w = 2.2
-        gap = 2.0
-        n_bars = 5
+        bars = voice_bars if (voice_bars and len(voice_bars) >= 6) else [0.12] * 6
+        bar_w = 2.6
+        gap = 2.1
+        n_bars = len(bars)
         wave_w = n_bars * bar_w + (n_bars - 1) * gap
 
         if hovered and nh >= 28:
@@ -447,21 +448,30 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
                 p.setPen(QPen(QColor("#ffffff"), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
                 p.drawLine(QPointF(mcx - 4.5, mcy + 4.5), QPointF(mcx + 4.5, mcy - 4.5))
         else:
-            wave_x = right - wave_w - 11.0
+            wave_x = right - wave_w - 10.0
 
-        shapes = (0.62, 0.90, 1.00, 0.88, 0.58)
+        max_bar_h = max(10.0, nh - 6.0)
+        bar_grad = QLinearGradient(wave_x, cy - max_bar_h / 2.0, wave_x + wave_w, cy + max_bar_h / 2.0)
+        if muted:
+            bar_grad.setColorAt(0.0, QColor("#ff453a"))
+            bar_grad.setColorAt(1.0, QColor("#ff6961"))
+            glow_c = QColor(255, 69, 58, 75)
+        else:
+            bar_grad.setColorAt(0.0, QColor("#22c55e"))
+            bar_grad.setColorAt(0.5, QColor("#30d158"))
+            bar_grad.setColorAt(1.0, QColor("#4ade80"))
+            glow_c = QColor(48, 209, 88, 85)
+
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(col)
-        max_bh = 12.5 if hovered else 11.0
-        for i in range(n_bars):
-            if muted:
-                bh = 2.2
-            elif voice_bars and i < len(voice_bars):
-                bh = max(2.2, min(max_bh, float(voice_bars[i]) * max_bh))
-            else:
-                amp = 0.22 + 0.78 * abs(math.sin(phase * (1.15 + i * 0.28) + i * 1.15))
-                bh = max(2.2, min(max_bh, amp * shapes[i] * max_bh))
-            p.drawRoundedRect(QRectF(wave_x + i * (bar_w + gap), cy - bh / 2.0, bar_w, bh), 1.1, 1.1)
+        for i, amp in enumerate(bars):
+            bx = wave_x + i * (bar_w + gap)
+            bh = 2.2 if muted else max(2.2, min(max_bar_h, float(amp) * max_bar_h))
+            by = cy - bh / 2.0
+            # Soft blurry green halo + crisp inner bar (identical to Music Notch visualizer!)
+            p.setBrush(glow_c)
+            p.drawRoundedRect(QRectF(bx - 1.0, by - 1.0, bar_w + 2.0, bh + 2.0), 1.9, 1.9)
+            p.setBrush(QBrush(bar_grad))
+            p.drawRoundedRect(QRectF(bx, by, bar_w, bh), 1.3, 1.3)
 
         return mute_rect
 
