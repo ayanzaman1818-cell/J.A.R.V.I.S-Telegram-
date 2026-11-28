@@ -2472,7 +2472,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
         notification_received = Signal(str, str, str)
         shutdown_requested = Signal()
 
-        EXPANDED_STATES = ("dashboard", "suggestions", "chat", "voice", "tools", "lyrics", "toast")
+        EXPANDED_STATES = ("dashboard", "suggestions", "chat", "voice", "tools", "lyrics", "toast", "timer_done")
 
         # Target visual notch dimensions (width, height) inside the fixed 920x540 canvas
         SIZES: dict[str, tuple[int, int]] = {
@@ -2500,6 +2500,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             "tools": (608, 244),           # Utility Hub: Drag-and-Drop File Shelf, Clipboard History, Live Mirror, Quick Timer
             "lyrics": (568, 212),          # Synced Live Lyrics card (lrclib.net) + built-in playback controls
             "toast": (412, 76),            # Live Notification Toast pill (Telegram / Reminders / Timer)
+            "timer_done": (428, 76),       # Timer Finished takeover: Left 'Timer finished!', Right More Time + X
             "suggestions": (488, 516),     # Connections hub card
             "chat": (556, 336),            # JARVIS Quick Chat card
             "chat_active": (556, 468),     # JARVIS Quick Chat card with active conversation
@@ -2705,7 +2706,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
 
             if not just_clicked:
                 return
-            if self.pinned or self.state not in self.EXPANDED_STATES:
+            if self.pinned or self.state not in self.EXPANDED_STATES or self.state == "timer_done":
                 return
 
             # Check if the global cursor position is outside the current visible notch rectangle
@@ -2908,7 +2909,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             clock_active, clock_mode, clock_fmt, clock_sec, clock_frac = self.service._clock_tracker.current_state()
             finished_lbl = self.service._clock_tracker.pop_finished_timer_label()
             if finished_lbl:
-                self._on_notification_toast(f"{finished_lbl} Done", "Your Notch focus timer has finished!", "timer")
+                self._on_timer_finished_takeover(finished_lbl)
             prev_clock_active = getattr(self, "_clock_active", False)
             self._clock_mode = clock_mode
             self._clock_fmt = clock_fmt
@@ -3242,6 +3243,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._tools_page.on_hidden()
             if prev_state == "toast" and new_state != "toast" and hasattr(self, "_toast_timer"):
                 self._toast_timer.stop()
+            if prev_state == "timer_done" and new_state != "timer_done" and hasattr(self, "_timer_done_page"):
+                self._timer_done_page.stop_alarm()
             self.state = new_state
             if new_state == "idle":
                 # Closing the notch resets the pause grace timer so next time you open it while paused, it stays compact
@@ -3369,6 +3372,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._stack.setCurrentIndex(5)
             elif mode == "toast":
                 self._stack.setCurrentIndex(6)
+            elif mode == "timer_done":
+                self._stack.setCurrentIndex(7)
             self._content_root.show()
 
         # --- Hover, Click, Scroll & Drag-Drop Events on the Notch ---
@@ -4073,6 +4078,12 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._toast_page.dismiss_clicked.connect(self._dismiss_toast_if_active)
             self._stack.addWidget(self._toast_page)
 
+            # Page 7: Timer Finished Takeover (Left: 'Timer finished!', Right: More Time + X)
+            self._timer_done_page = _EXTRAS["NotchTimerDonePage"]()
+            self._timer_done_page.dismiss_clicked.connect(self._on_timer_done_dismiss)
+            self._timer_done_page.more_time_clicked.connect(self._on_timer_done_more_time)
+            self._stack.addWidget(self._timer_done_page)
+
             root_layout.addWidget(self._stack)
             self._content_root.hide()
 
@@ -4304,6 +4315,24 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._focus_mode_active = True
                 self.service._clock_tracker.start_quick_timer(25 * 60, "Focus Mode")
                 self._animate_to("idle", duration_ms=380)
+
+        def _on_timer_finished_takeover(self, label: str = "Timer") -> None:
+            """Grow the notch vertically & horizontally into the Timer Finished alarm takeover."""
+            self._last_finished_timer_lbl = label or "Timer"
+            self._focus_mode_active = False
+            if getattr(self, "_fullscreen_hidden", False):
+                return
+            self._timer_done_page.start_alarm(self._last_finished_timer_lbl)
+            self._animate_to("timer_done", duration_ms=420)
+
+        def _on_timer_done_dismiss(self) -> None:
+            self._timer_done_page.stop_alarm()
+            self._animate_to("idle", duration_ms=380)
+
+        def _on_timer_done_more_time(self) -> None:
+            self._timer_done_page.stop_alarm()
+            self.service._clock_tracker.start_quick_timer(60, "+1m Extra")
+            self._animate_to("idle", duration_ms=380)
 
         def _on_notification_toast(self, title: str, body: str, source: str = "JARVIS") -> None:
             """Pop open a sleek 5.5s Dynamic Island notification toast when idle (suppressed in fullscreen & Focus Mode)."""

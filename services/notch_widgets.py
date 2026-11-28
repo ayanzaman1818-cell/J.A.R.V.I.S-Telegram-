@@ -2090,6 +2090,174 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
             self._title_lbl.setText(title[:42])
             self._body_lbl.setText(" ".join((body or "").splitlines())[:56])
 
+    # ------------------------------------------------------------------
+    # 8. Timer Finished Dynamic Island Takeover Banner (Left: 'Timer finished!', Right: More Time + X)
+    # ------------------------------------------------------------------
+
+    def _ensure_timer_chime_wav_file() -> Path:
+        """Synthesize a clean, pleasant Apple-style pulsing timer chime WAV to .cache."""
+        import struct
+        wav_path = Path(__file__).resolve().parent.parent / ".cache" / "ios_timer_chime.wav"
+        wav_path.parent.mkdir(parents=True, exist_ok=True)
+        sr = 44100
+        dur = 0.72
+        n_samples = int(sr * dur)
+        pcm = bytearray()
+        # Two soft ascending radar/marimba pulses (E5 -> B5)
+        notes = ((0.0, 659.25, 0.28), (0.20, 987.77, 0.48))
+        for i in range(n_samples):
+            t = i / sr
+            acc = 0.0
+            for t0, freq, decay in notes:
+                if t >= t0:
+                    dt = t - t0
+                    env = min(1.0, dt / 0.008) * math.exp(-dt / (decay * 0.45))
+                    acc += (
+                        0.72 * math.sin(2.0 * math.pi * freq * dt)
+                        + 0.20 * math.sin(2.0 * math.pi * freq * 2.0 * dt)
+                    ) * env
+            val = max(-32767, min(32767, int(acc * 14500.0)))
+            pcm.extend(struct.pack("<h", val))
+        data_sz = len(pcm)
+        hdr = struct.pack(
+            "<4sI4s4sIHHIIHH4sI",
+            b"RIFF", 36 + data_sz, b"WAVE",
+            b"fmt ", 16, 1, 1, sr, sr * 2, 2, 16,
+            b"data", data_sz,
+        )
+        wav_path.write_bytes(hdr + bytes(pcm))
+        return wav_path
+
+    _TIMER_CHIME_PATH = _ensure_timer_chime_wav_file()
+
+    class _RingingTimerIcon(QWidget):
+        """Animated pulsing orange vector timer bell/dial icon for the Timer Finished takeover."""
+
+        def __init__(self, parent: Optional[QWidget] = None) -> None:
+            super().__init__(parent)
+            self.setFixedSize(36, 36)
+            self._phase = 0.0
+            self._t = QTimer(self)
+            self._t.setInterval(33)
+            self._t.timeout.connect(self._tick)
+
+        def start_ringing(self) -> None:
+            self._phase = 0.0
+            self._t.start()
+
+        def stop_ringing(self) -> None:
+            self._t.stop()
+
+        def _tick(self) -> None:
+            self._phase = (self._phase + 0.16) % (math.pi * 2.0)
+            self.update()
+
+        def paintEvent(self, _ev: Any) -> None:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            cx, cy = self.width() / 2.0, self.height() / 2.0
+            pulse = 0.5 + 0.5 * math.sin(self._phase)
+            # Soft orange pulsing ring
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(255, 159, 10, int(28 + 38 * pulse)))
+            p.drawEllipse(QPointF(cx, cy), 14.0 + 3.0 * pulse, 14.0 + 3.0 * pulse)
+            # Inner crisp orange timer dial
+            p.setBrush(QColor(255, 159, 10, 56))
+            p.drawEllipse(QPointF(cx, cy), 12.5, 12.5)
+            p.save()
+            # Subtle ringing wiggle
+            p.translate(cx, cy)
+            p.rotate(math.sin(self._phase * 2.0) * 8.0)
+            orange = QColor("#ff9f0a")
+            p.setPen(QPen(orange, 1.85, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QPointF(0.0, 0.8), 7.2, 7.2)
+            p.drawLine(QPointF(-2.8, -8.2), QPointF(2.8, -8.2))
+            p.drawLine(QPointF(0.0, 0.8), QPointF(0.0, -3.5))
+            p.drawLine(QPointF(0.0, 0.8), QPointF(3.2, 2.2))
+            p.restore()
+
+    class NotchTimerDonePage(QWidget):
+        """Expanded Dynamic Island Timer Finished takeover: Left 'Timer finished!', Right 'More Time' + 'X'."""
+
+        dismiss_clicked = Signal()
+        more_time_clicked = Signal()
+
+        def __init__(self, parent: Optional[QWidget] = None) -> None:
+            super().__init__(parent)
+            self._chime_fx: Any = None
+            self._chime_timer = QTimer(self)
+            self._chime_timer.setInterval(2000)
+            self._chime_timer.timeout.connect(self._play_chime_once)
+
+            hl = QHBoxLayout(self)
+            hl.setContentsMargins(10, 4, 10, 4)
+            hl.setSpacing(10)
+
+            self._icon = _RingingTimerIcon()
+            hl.addWidget(self._icon, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+            col = QVBoxLayout()
+            col.setSpacing(1)
+            self._title_lbl = QLabel("Timer finished!")
+            self._title_lbl.setStyleSheet(
+                "color: #ffffff; font-size: 14px; font-weight: 800; background: transparent;"
+            )
+            self._sub_lbl = QLabel("00:00")
+            self._sub_lbl.setStyleSheet(
+                "color: #ff9f0a; font-size: 11px; font-weight: 700; background: transparent;"
+            )
+            col.addWidget(self._title_lbl)
+            col.addWidget(self._sub_lbl)
+            hl.addLayout(col, stretch=1)
+
+            btn_more = QPushButton("More Time")
+            btn_more.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn_more.setFixedHeight(32)
+            btn_more.setToolTip("Add +1 minute to the timer")
+            btn_more.setStyleSheet(
+                "QPushButton { background: rgba(255,159,10,0.22); color: #ff9f0a; border: none; "
+                "border-radius: 16px; padding: 0 13px; font-size: 11px; font-weight: 800; }"
+                "QPushButton:hover { background: rgba(255,159,10,0.38); color: #ffffff; }"
+            )
+            btn_more.clicked.connect(self._on_more_time)
+            hl.addWidget(btn_more, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+            btn_x = _CircularTimerActionBtn("stop", size=32)
+            btn_x.setToolTip("Dismiss timer alarm")
+            btn_x.clicked.connect(self._on_dismiss)
+            hl.addWidget(btn_x, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        def _play_chime_once(self) -> None:
+            try:
+                if self._chime_fx is None:
+                    from PySide6.QtMultimedia import QSoundEffect
+                    fx = QSoundEffect()
+                    fx.setSource(QUrl.fromLocalFile(str(_TIMER_CHIME_PATH)))
+                    fx.setVolume(0.75)
+                    self._chime_fx = fx
+                self._chime_fx.play()
+            except Exception:
+                pass
+
+        def start_alarm(self, label: str = "Timer") -> None:
+            self._sub_lbl.setText(f"{label} · 00:00" if label else "00:00")
+            self._icon.start_ringing()
+            self._play_chime_once()
+            self._chime_timer.start()
+
+        def stop_alarm(self) -> None:
+            self._chime_timer.stop()
+            self._icon.stop_ringing()
+
+        def _on_dismiss(self) -> None:
+            self.stop_alarm()
+            self.dismiss_clicked.emit()
+
+        def _on_more_time(self) -> None:
+            self.stop_alarm()
+            self.more_time_clicked.emit()
+
     return {
         "draw_hud_pill": draw_hud_pill,
         "draw_battery_pill": draw_battery_pill,
@@ -2104,6 +2272,7 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
         "NotchToolsPage": NotchToolsPage,
         "NotchLyricsPage": NotchLyricsPage,
         "NotchToastPage": NotchToastPage,
+        "NotchTimerDonePage": NotchTimerDonePage,
         "ScreenColorPickerOverlay": ScreenColorPickerOverlay,
         "ScreenSnipOverlay": ScreenSnipOverlay,
     }
