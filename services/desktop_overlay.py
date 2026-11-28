@@ -393,7 +393,11 @@ class DesktopOverlayService:
         from services.media_timeline import MediaTimelineTracker
         from services.clock_tracker import WindowsClockTracker
         from services.notch_extras import (
+            BluetoothTracker,
+            BrightnessTracker,
+            CallActivityTracker,
             DownloadsWatcher,
+            NetworkTracker,
             PrivacyIndicatorTracker,
             SyncedLyricsTracker,
             WeatherTracker,
@@ -404,6 +408,10 @@ class DesktopOverlayService:
         self._downloads_watcher = DownloadsWatcher()
         self._weather_tracker = WeatherTracker(getattr(config, "LOCATION", "Dhaka"))
         self._lyrics_tracker = SyncedLyricsTracker()
+        self._brightness_tracker = BrightnessTracker()
+        self._network_tracker = NetworkTracker()
+        self._bt_tracker = BluetoothTracker()
+        self._call_tracker = CallActivityTracker()
         self._now_playing_state: dict[str, Any] = {
             "playing": False,
             "track": "No song playing right now",
@@ -448,8 +456,10 @@ class DesktopOverlayService:
         *,
         auto_see: bool | None = None,
         speak_reply: bool = False,
+        extra_media_bytes: bytes | None = None,
+        extra_mime_type: str | None = None,
     ) -> str:
-        """Submit a query (with optional live monitor screenshot) directly to brain.agent.respond()."""
+        """Submit a query (with optional live monitor screenshot or snipped region) directly to brain.agent.respond()."""
         from brain.agent import respond as brain_respond
         from tools.desktop import capture_screen_jpeg
 
@@ -458,10 +468,10 @@ class DesktopOverlayService:
             return ""
 
         use_screen = self.auto_see_screen if auto_see is None else bool(auto_see)
-        media_bytes: bytes | None = None
-        mime_type: str | None = None
+        media_bytes: bytes | None = extra_media_bytes
+        mime_type: str | None = extra_mime_type
 
-        if use_screen:
+        if media_bytes is None and use_screen:
             try:
                 jpeg_bytes, _meta = await asyncio.to_thread(
                     capture_screen_jpeg,
@@ -2467,6 +2477,12 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             "tucked": (76, 3),             # Ultra-thin 3px top edge micro-line when cursor approaches tabs/titlebar below
             "idle": (96, 7),               # Compact micro-strip at top center when no music or clock is active
             "idle_privacy": (118, 16),     # Glowing Mic (orange) / Camera (green) privacy indicator pill
+            "idle_lock": (128, 22),        # Caps Lock / Num Lock 1.2s micro-pill
+            "idle_color": (168, 25),       # Color Picker #HEX swatch copied pill
+            "idle_net": (176, 25),         # Wi-Fi drop (amber) / reconnect (emerald) pill
+            "idle_bt": (236, 26),          # Bluetooth device connect/disconnect + battery % pill
+            "idle_call": (178, 25),        # Active Discord/Meet/Zoom call pulsing waveform + duration
+            "hover_call": (224, 34),       # Hovered Active Call pill with 1-click Mute Mic button
             "idle_hud": (208, 26),         # Live Volume / Brightness HUD pop-out pill
             "idle_battery": (188, 25),     # Charging pulse / Low-Battery alert pill
             "idle_download": (244, 25),    # Live Downloads progress ring & emerald completion checkmark
@@ -2579,6 +2595,32 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._dl_name: str = ""
             self._dl_detail: str = ""
             self._dl_spin: float = 0.0
+            # Extended live pills (Lock keys, Bluetooth, Network, Active Call, Color Swatch, Focus Mode)
+            self._lock_caps_prev: Optional[bool] = None
+            self._lock_num_prev: Optional[bool] = None
+            self._lock_key_name: str = ""
+            self._lock_key_on: bool = False
+            self._lock_until: float = 0.0
+            self._bt_name: str = ""
+            self._bt_connected: bool = True
+            self._bt_battery: int = -1
+            self._bt_until: float = 0.0
+            self._net_online: bool = True
+            self._net_until: float = 0.0
+            self._net_down_text: str = ""
+            self._call_active: bool = False
+            self._call_app: str = ""
+            self._call_dur: str = ""
+            self._call_muted: bool = False
+            self._call_phase: float = 0.0
+            self._hover_call_mute_rect: Any = None
+            self._hover_call_mute_hit: bool = False
+            self._color_hex: str = ""
+            self._color_until: float = 0.0
+            self._focus_mode_active: bool = False
+            self._hover_scrub_rect: Any = None
+            self._hover_scrub_x: Optional[float] = None
+            self._active_overlay_tool: Any = None
             self._last_idle_key: str = "idle"
             self._toast_timer = QTimer(self)
             self._toast_timer.setSingleShot(True)
@@ -2832,12 +2874,16 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                         self._art_thumb_hi = None
                     if hasattr(self, "_dash_music_icon"):
                         self._dash_music_icon.set_pixmap(self._art_pixmap)
+                    if hasattr(self, "_lyrics_page"):
+                        self._lyrics_page.set_album_pixmap(self._art_pixmap)
             elif not is_playing:
                 self._art_pixmap = None
                 self._art_thumb_hi = None
                 self._art_pixmap_track = ""
                 if hasattr(self, "_dash_music_icon") and time.time() >= getattr(self, "_dash_media_grace_until", 0.0):
                     self._dash_music_icon.set_pixmap(None)
+                if hasattr(self, "_lyrics_page"):
+                    self._lyrics_page.set_album_pixmap(None)
 
             # Automatically morph the idle/hover/dashboard notch size when music starts or stops,
             # OR when the 20s pause grace window expires (magnetically sucking the Music Tab back into the notch!)
@@ -2954,6 +3000,71 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             if self._dl_state == "downloading":
                 self._dl_spin = (self._dl_spin + 0.045) % 1000.0
 
+            # Caps Lock / Num Lock instant micro-pill (1.2s)
+            try:
+                from services.notch_extras import get_lock_key_states
+                c_on, n_on = get_lock_key_states()
+                if self._lock_caps_prev is not None and c_on != self._lock_caps_prev:
+                    self._lock_key_name = "CAPS"
+                    self._lock_key_on = c_on
+                    self._lock_until = now_t + 1.25
+                elif self._lock_num_prev is not None and n_on != self._lock_num_prev:
+                    self._lock_key_name = "NUM"
+                    self._lock_key_on = n_on
+                    self._lock_until = now_t + 1.25
+                self._lock_caps_prev = c_on
+                self._lock_num_prev = n_on
+            except Exception:
+                pass
+
+            # Laptop Screen Brightness HUD pop-out (non-blocking; auto-disables on desktops)
+            try:
+                new_bright = self.service._brightness_tracker.pop_changed_brightness()
+                if new_bright is not None and self.state in ("idle", "hover"):
+                    self._hud_kind = "brightness"
+                    self._hud_val = int(new_bright)
+                    self._hud_muted = False
+                    self._hud_until = now_t + 1.85
+            except Exception:
+                pass
+
+            # Network / Wi-Fi Drop & Live Speed Tracker (<0.5ms, cached 1.0s)
+            try:
+                net = self.service._network_tracker.poll()
+                self._net_down_text = str(net.get("down_text") or "")
+                net_ev = str(net.get("event") or "")
+                if net_ev == "offline":
+                    self._net_online = False
+                    self._net_until = now_t + 4.0
+                elif net_ev == "reconnected":
+                    self._net_online = True
+                    self._net_until = now_t + 2.8
+            except Exception:
+                pass
+
+            # Bluetooth Device Connect / Disconnect & Battery Pill (background poll every 4.5s)
+            try:
+                bt_ev = self.service._bt_tracker.pop_event()
+                if bt_ev:
+                    self._bt_name = str(bt_ev.get("name") or "Bluetooth")
+                    self._bt_connected = bool(bt_ev.get("connected", True))
+                    self._bt_battery = int(bt_ev.get("battery", -1))
+                    self._bt_until = now_t + 3.4
+            except Exception:
+                pass
+
+            # Active Call (Discord / Meet / Zoom / Teams) Pill
+            try:
+                c_st = self.service._call_tracker.update(new_mic)
+                self._call_active = bool(c_st.get("active"))
+                self._call_app = str(c_st.get("app") or "")
+                self._call_dur = str(c_st.get("duration") or "")
+                self._call_muted = bool(c_st.get("muted"))
+                if self._call_active:
+                    self._call_phase = (self._call_phase + 0.14) % 1000.0
+            except Exception:
+                pass
+
             # Auto-morph idle/hover notch smoothly whenever active idle mode changes
             if self.state in ("idle", "hover"):
                 cur_idle_key = self._resolve_idle_key(self.state)
@@ -2963,6 +3074,11 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 elif (
                     (clock_active and not is_playing)
                     or (now_t < self._hud_until)
+                    or (now_t < self._lock_until)
+                    or (now_t < self._bt_until)
+                    or (now_t < self._net_until)
+                    or (now_t < self._color_until)
+                    or self._call_active
                     or (self._dl_state == "downloading")
                 ):
                     self.update()
@@ -3053,12 +3169,22 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             now_t = time.time()
             if state_name == "idle" and getattr(self, "_tucked_dodge", False):
                 return "tucked"
+            if now_t < getattr(self, "_color_until", 0.0):
+                return "idle_color"
             if now_t < getattr(self, "_hud_until", 0.0):
                 return "idle_hud"
+            if now_t < getattr(self, "_lock_until", 0.0):
+                return "idle_lock"
+            if now_t < getattr(self, "_bt_until", 0.0):
+                return "idle_bt"
+            if now_t < getattr(self, "_net_until", 0.0):
+                return "idle_net"
             if now_t < getattr(self, "_batt_pulse_until", 0.0) or getattr(self, "_batt_low_active", False):
                 return "idle_battery"
             if getattr(self, "_dl_state", "idle") in ("downloading", "done"):
                 return "idle_download"
+            if getattr(self, "_call_active", False):
+                return "hover_call" if state_name == "hover" else "idle_call"
             has_music = getattr(self, "_music_playing_active", False)
             has_clock = getattr(self, "_clock_active", False)
             if state_name == "hover":
@@ -3137,8 +3263,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             else:
                 self._fading_out = False
                 self._fade_anim.stop()
-                # Set _content_root geometry AND initial opacity=0.0 BEFORE showing so there is ZERO 1-frame flash!
-                start_op = 0.20 if was_expanded else 0.0
+                # Smooth content crossfade when switching between expanded pages (Dashboard / Tools / Lyrics / Chat)
+                start_op = 0.0
                 self._opacity_effect.setOpacity(start_op)
                 pad_x = 18
                 cur_w_even = int(round(float(tw) / 2.0)) * 2
@@ -3149,9 +3275,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     max(10, int(round(float(th))) - 14),
                 )
                 self._switch_stack_page(new_state, opening_fresh=(not was_expanded))
-                # InOutCubic blooms smoothly as the notch widens (Calendar, System Monitor & Now Playing fade in organically!)
-                self._fade_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-                self._fade_anim.setDuration(360 if was_expanded else 560)
+                self._fade_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+                self._fade_anim.setDuration(240 if was_expanded else 380)
                 self._fade_anim.setStartValue(start_op)
                 self._fade_anim.setEndValue(1.0)
                 self._fade_anim.start()
@@ -3277,6 +3402,10 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._hover_media_hit = ""
                 self._hover_timer_cancel_hit = False
                 self._hover_timer_cancel_rect = None
+                self._hover_call_mute_hit = False
+                self._hover_call_mute_rect = None
+                self._hover_scrub_x = None
+                self._hover_scrub_rect = None
                 self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
                 local = self.mapFromGlobal(QCursor.pos())
                 if 3 <= local.y() <= 54 and abs(local.x() - CANVAS_W / 2.0) <= 165.0:
@@ -3304,11 +3433,23 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     self._hover_timer_cancel_hit = cancel_hit
                     changed = True
 
+                mute_rect = getattr(self, "_hover_call_mute_rect", None)
+                mute_hit = bool(mute_rect and mute_rect.contains(pt))
+                if mute_hit != getattr(self, "_hover_call_mute_hit", False):
+                    self._hover_call_mute_hit = mute_hit
+                    changed = True
+
+                scrub_rect = getattr(self, "_hover_scrub_rect", None)
+                scrub_x = float(pt.x()) if (scrub_rect and scrub_rect.contains(pt)) else None
+                if scrub_x != getattr(self, "_hover_scrub_x", None):
+                    self._hover_scrub_x = scrub_x
+                    changed = True
+
                 if changed:
                     self.setCursor(
                         QCursor(
                             Qt.CursorShape.PointingHandCursor
-                            if (hit or cancel_hit)
+                            if (hit or cancel_hit or mute_hit or scrub_x is not None)
                             else Qt.CursorShape.ArrowCursor
                         )
                     )
@@ -3319,14 +3460,28 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             if self.state in ("idle", "hover"):
                 if event.button() == Qt.MouseButton.LeftButton:
                     pt = event.position()
+                    # In hover_call, clicking the circular Mic button toggles default mic mute!
+                    if self.state == "hover":
+                        mute_rect = getattr(self, "_hover_call_mute_rect", None)
+                        if mute_rect and mute_rect.contains(pt):
+                            self._call_muted = self.service._call_tracker.toggle_mute()
+                            self.update()
+                            return
                     # In hover_clock / hover_music_clock, clicking the X button cancels the running timer!
                     if self.state == "hover":
                         cancel_rect = getattr(self, "_hover_timer_cancel_rect", None)
                         if cancel_rect and cancel_rect.contains(pt):
                             self._on_stop_quick_timer()
                             return
-                    # In hover_music, clicking any of the 3 mini vector controls controls playback directly!
+                    # In hover_music, clicking the bottom progress hairline seeks directly!
                     if self.state == "hover" and getattr(self, "_music_playing_active", False):
+                        scrub_rect = getattr(self, "_hover_scrub_rect", None)
+                        if scrub_rect and scrub_rect.contains(pt):
+                            _pos, dur_s, _pl = self.service._media_timeline.current_position()
+                            if dur_s > 0 and scrub_rect.width() > 4:
+                                ratio = max(0.0, min(1.0, (float(pt.x()) - scrub_rect.left()) / scrub_rect.width()))
+                                self.service._media_timeline.seek_async(ratio * dur_s)
+                                return
                         for act, rect in getattr(self, "_hover_media_rects", {}).items():
                             if rect.contains(pt):
                                 self._on_dash_media_control(act)
@@ -3406,7 +3561,27 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             p.drawPath(path)
 
             if nh > 60:
-                pass
+                # Subtle album-art ambient tint strictly inside the left Now Playing card (zero outer glow!)
+                if self.state == "dashboard" and getattr(self, "_media_panel_expanded", False):
+                    pal = self.service._current_art_palette or [(56, 189, 248)]
+                    c0 = QColor(*pal[0])
+                    p.save()
+                    p.setClipPath(path)
+                    card_cx = left + 125.0
+                    card_cy = nh * 0.52
+                    rg = QRadialGradient(QPointF(card_cx, card_cy), 132.0)
+                    rg.setColorAt(0.0, QColor(c0.red(), c0.green(), c0.blue(), 26))
+                    rg.setColorAt(0.65, QColor(c0.red(), c0.green(), c0.blue(), 10))
+                    rg.setColorAt(1.0, QColor(c0.red(), c0.green(), c0.blue(), 0))
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.setBrush(QBrush(rg))
+                    p.drawRect(QRectF(left, 0.0, 260.0, nh))
+                    p.restore()
+            elif self.state in ("idle", "hover") and time.time() < getattr(self, "_color_until", 0.0) and nh >= 14:
+                p.save()
+                p.setClipPath(path)
+                _EXTRAS["draw_color_swatch_pill"](p, left, right, nw, nh, getattr(self, "_color_hex", "#38BDF8"))
+                p.restore()
             elif self.state in ("idle", "hover") and time.time() < getattr(self, "_hud_until", 0.0) and nh >= 14:
                 p.save()
                 p.setClipPath(path)
@@ -3416,6 +3591,30 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     int(getattr(self, "_hud_val", 0)),
                     bool(getattr(self, "_hud_muted", False)),
                 )
+                p.restore()
+            elif self.state in ("idle", "hover") and time.time() < getattr(self, "_lock_until", 0.0) and nh >= 14:
+                p.save()
+                p.setClipPath(path)
+                _EXTRAS["draw_lockkey_pill"](
+                    p, left, right, nw, nh,
+                    getattr(self, "_lock_key_name", "CAPS"),
+                    bool(getattr(self, "_lock_key_on", False)),
+                )
+                p.restore()
+            elif self.state in ("idle", "hover") and time.time() < getattr(self, "_bt_until", 0.0) and nh >= 14:
+                p.save()
+                p.setClipPath(path)
+                _EXTRAS["draw_bluetooth_pill"](
+                    p, left, right, nw, nh,
+                    getattr(self, "_bt_name", "Bluetooth"),
+                    bool(getattr(self, "_bt_connected", True)),
+                    int(getattr(self, "_bt_battery", -1)),
+                )
+                p.restore()
+            elif self.state in ("idle", "hover") and time.time() < getattr(self, "_net_until", 0.0) and nh >= 14:
+                p.save()
+                p.setClipPath(path)
+                _EXTRAS["draw_network_pill"](p, left, right, nw, nh, bool(getattr(self, "_net_online", True)))
                 p.restore()
             elif self.state in ("idle", "hover") and (
                 time.time() < getattr(self, "_batt_pulse_until", 0.0) or getattr(self, "_batt_low_active", False)
@@ -3431,12 +3630,28 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             elif self.state in ("idle", "hover") and getattr(self, "_dl_state", "idle") in ("downloading", "done") and nh >= 14:
                 p.save()
                 p.setClipPath(path)
+                dl_det = getattr(self, "_dl_detail", "")
+                if self.state == "hover" and getattr(self, "_dl_state", "") == "downloading" and getattr(self, "_net_down_text", ""):
+                    dl_det = f"↓ {self._net_down_text}"
                 _EXTRAS["draw_download_pill"](
                     p, left, right, nw, nh,
                     getattr(self, "_dl_state", "downloading"),
                     getattr(self, "_dl_name", ""),
-                    getattr(self, "_dl_detail", ""),
+                    dl_det,
                     float(getattr(self, "_dl_spin", 0.0)),
+                )
+                p.restore()
+            elif self.state in ("idle", "hover") and getattr(self, "_call_active", False) and nh >= 14:
+                p.save()
+                p.setClipPath(path)
+                self._hover_call_mute_rect = _EXTRAS["draw_call_pill"](
+                    p, left, right, nw, nh,
+                    getattr(self, "_call_app", "Call"),
+                    getattr(self, "_call_dur", "0:00"),
+                    bool(getattr(self, "_call_muted", False)),
+                    float(getattr(self, "_call_phase", 0.0)),
+                    hovered=(self.state == "hover"),
+                    mute_hit=bool(getattr(self, "_hover_call_mute_hit", False)),
                 )
                 p.restore()
             elif self.state in ("idle", "hover") and getattr(self, "_music_playing_active", False) and nh >= 13:
@@ -3500,7 +3715,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 pos_s, dur_s, _tl_playing = self.service._media_timeline.current_position()
                 prog_ratio = max(0.0, min(1.0, pos_s / dur_s)) if dur_s > 0 else 0.0
 
-                if self.state == "hover" and center_w >= 68.0:
+                is_scrub_hover = self.state == "hover" and getattr(self, "_hover_scrub_x", None) is not None and dur_s > 0
+                if self.state == "hover" and center_w >= 68.0 and not is_scrub_hover:
                     # Interactive 1-click hover mini media controls (Prev | Play/Pause | Next)
                     mid_x = center_left + center_w / 2.0
                     mid_y = (nh - 3.5) / 2.0
@@ -3536,7 +3752,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                                 p.drawRoundedRect(QRectF(rcx + 1.1, rcy - 4.0, 2.2, 8.0), 1.0, 1.0)
                             else:
                                 p.drawPolygon(QPolygonF([QPointF(rcx - 2.8, rcy - 4.2), QPointF(rcx - 2.8, rcy + 4.2), QPointF(rcx + 4.2, rcy)]))
-                else:
+                elif not is_scrub_hover:
                     self._hover_media_rects = {}
                     song_text = getattr(self, "_idle_song_title", "") or "Now Playing"
                     title_font = QFont("SF Pro Display", 8, QFont.Weight.DemiBold)
@@ -3570,19 +3786,39 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                         p.drawText(draw_r, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, song_text)
                     p.restore()
 
-                # Sleek 1.8px live album-tinted track progress hairline directly below the title
-                bar_y = nh - 4.0
-                bar_h = 1.8
+                # Interactive Hover Waveform / Progress Scrub Hairline
+                is_scrub_hover = self.state == "hover" and getattr(self, "_hover_scrub_x", None) is not None and dur_s > 0
+                if self.state == "hover" and dur_s > 0:
+                    self._hover_scrub_rect = QRectF(center_left, nh - 9.0, center_w, 9.0)
+                else:
+                    self._hover_scrub_rect = None
+
+                bar_h = 3.0 if is_scrub_hover else 1.8
+                bar_y = nh - (4.6 if is_scrub_hover else 4.0)
+                disp_ratio = prog_ratio
+                if is_scrub_hover and self._hover_scrub_x is not None and center_w > 4.0:
+                    disp_ratio = max(0.0, min(1.0, (self._hover_scrub_x - center_left) / center_w))
+                    # Show crisp timestamp right above the scrub bar
+                    s_cur = int(disp_ratio * dur_s)
+                    s_tot = int(dur_s)
+                    ts_txt = f"{s_cur // 60}:{s_cur % 60:02d} / {s_tot // 60}:{s_tot % 60:02d}"
+                    p.setPen(QColor("#e2e8f0"))
+                    p.setFont(QFont("SF Pro Display", 7, QFont.Weight.Bold))
+                    p.drawText(QRectF(center_left, 1.0, center_w, nh - 9.0), Qt.AlignmentFlag.AlignCenter, ts_txt)
+
                 p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QColor(255, 255, 255, 34))
-                p.drawRoundedRect(QRectF(center_left, bar_y, center_w, bar_h), 0.9, 0.9)
-                if prog_ratio > 0.005:
-                    fill_w = max(2.0, center_w * prog_ratio)
+                p.setBrush(QColor(255, 255, 255, 48 if is_scrub_hover else 34))
+                p.drawRoundedRect(QRectF(center_left, bar_y, center_w, bar_h), bar_h / 2.0, bar_h / 2.0)
+                if disp_ratio > 0.005:
+                    fill_w = max(2.0, center_w * disp_ratio)
                     prog_grad = QLinearGradient(center_left, bar_y, center_left + center_w, bar_y)
                     prog_grad.setColorAt(0.0, c0)
                     prog_grad.setColorAt(1.0, c1)
                     p.setBrush(QBrush(prog_grad))
-                    p.drawRoundedRect(QRectF(center_left, bar_y, fill_w, bar_h), 0.9, 0.9)
+                    p.drawRoundedRect(QRectF(center_left, bar_y, fill_w, bar_h), bar_h / 2.0, bar_h / 2.0)
+                    if is_scrub_hover:
+                        p.setBrush(QColor("#ffffff"))
+                        p.drawEllipse(QPointF(center_left + fill_w, bar_y + bar_h / 2.0), 2.8, 2.8)
 
                 # 3. Right Side: Live Audio Visualizer (colored with the blurry album background palette on the pure black notch)
 
@@ -3780,12 +4016,15 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._stack.addWidget(self._build_chat_page())
             self._stack.addWidget(self._build_voice_page())
 
-            # Page 4: Utility Hub (Drag-and-Drop File Shelf, Clipboard History, Live Webcam Mirror, Quick Pomodoro Timer)
+            # Page 4: Utility Hub (Shelf, Clip, Mirror, Timer, Notes, Tools)
             self._tools_page = _EXTRAS["NotchToolsPage"]()
             self._tools_page.go_home.connect(lambda: self._animate_to("dashboard", duration_ms=480))
             self._tools_page.ask_jarvis_file.connect(self._on_ask_jarvis_file)
             self._tools_page.start_quick_timer.connect(self._on_start_quick_timer)
             self._tools_page.stop_quick_timer.connect(self._on_stop_quick_timer)
+            self._tools_page.launch_color_picker.connect(self._launch_color_picker)
+            self._tools_page.launch_screen_snip.connect(self._launch_screen_snip)
+            self._tools_page.toggle_focus_mode.connect(self._toggle_focus_mode)
             self._stack.addWidget(self._tools_page)
 
             # Page 5: Synced Live Lyrics View (lrclib.net) + Focus Player + Built-in Playback Controls
@@ -3976,14 +4215,68 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self.service._clock_tracker.stop_quick_timer()
             self._clock_active = False
             self._clock_fmt = ""
+            self._focus_mode_active = False
             self._hover_timer_cancel_rect = None
             self._hover_timer_cancel_hit = False
             self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
             self._animate_to("idle", duration_ms=440)
 
+        def _launch_color_picker(self) -> None:
+            """Collapse the notch and open the fullscreen zoomed Eyedropper Color Picker."""
+            self._animate_to("idle", duration_ms=260)
+            def _open() -> None:
+                ov = _EXTRAS["ScreenColorPickerOverlay"]()
+                self._active_overlay_tool = ov
+                def _picked(hx: str) -> None:
+                    self._active_overlay_tool = None
+                    self._color_hex = hx
+                    self._color_until = time.time() + 2.6
+                    self._animate_to("idle", duration_ms=340)
+                ov.color_picked.connect(_picked)
+                ov.cancelled.connect(lambda: setattr(self, "_active_overlay_tool", None))
+                ov.show()
+                ov.raise_()
+                ov.activateWindow()
+            QTimer.singleShot(280, _open)
+
+        def _launch_screen_snip(self) -> None:
+            """Collapse the notch and open drag-to-snip overlay -> copies to clipboard & asks JARVIS Vision."""
+            self._animate_to("idle", duration_ms=260)
+            def _open() -> None:
+                ov = _EXTRAS["ScreenSnipOverlay"]()
+                self._active_overlay_tool = ov
+                def _snipped(jpg_bytes: bytes) -> None:
+                    self._active_overlay_tool = None
+                    self._animate_to("chat", duration_ms=380)
+                    self._submit_prompt(
+                        "Analyze this snipped screen region concisely, Sir.",
+                        speak_reply=False,
+                        extra_media_bytes=jpg_bytes,
+                        extra_mime_type="image/jpeg",
+                    )
+                ov.region_snipped.connect(_snipped)
+                ov.cancelled.connect(lambda: setattr(self, "_active_overlay_tool", None))
+                ov.show()
+                ov.raise_()
+                ov.activateWindow()
+            QTimer.singleShot(280, _open)
+
+        def _toggle_focus_mode(self) -> None:
+            """1-click Focus Mode: toggles 25m Pomodoro + silences non-critical notch toasts."""
+            if getattr(self, "_focus_mode_active", False):
+                self._focus_mode_active = False
+                self._on_stop_quick_timer()
+                self._on_notification_toast("Focus Mode Off", "Notch notifications restored, Sir.", "timer")
+            else:
+                self._focus_mode_active = True
+                self.service._clock_tracker.start_quick_timer(25 * 60, "Focus Mode")
+                self._animate_to("idle", duration_ms=380)
+
         def _on_notification_toast(self, title: str, body: str, source: str = "JARVIS") -> None:
-            """Pop open a sleek 5.5s Dynamic Island notification toast when idle (suppressed in fullscreen)."""
+            """Pop open a sleek 5.5s Dynamic Island notification toast when idle (suppressed in fullscreen & Focus Mode)."""
             if getattr(self, "_fullscreen_hidden", False):
+                return
+            if getattr(self, "_focus_mode_active", False) and "timer" not in (source or "").lower():
                 return
             if self.state not in ("idle", "hover", "toast"):
                 return
@@ -4159,8 +4452,8 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 quick_row.addWidget(tb)
 
             for tab_i, lbl, tip, min_w in (
-                (2, "Mirror", "Open live full-notch Webcam Mirror", 44),
-                (1, "Clip", "Open Clipboard History", 32),
+                (2, "Mirror", "Open live full-notch Webcam Mirror", 42),
+                (1, "Clip", "Open Clipboard History", 30),
             ):
                 qb = QPushButton(lbl)
                 qb.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -4174,6 +4467,32 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 )
                 qb.clicked.connect(lambda _c=False, ti=tab_i: self._open_tools_hub(ti))
                 quick_row.addWidget(qb)
+
+            btn_snip = QPushButton("Snip")
+            btn_snip.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn_snip.setFixedHeight(20)
+            btn_snip.setMinimumWidth(34)
+            btn_snip.setToolTip("Snip any screen region -> copy & Ask J.A.R.V.I.S.")
+            btn_snip.setStyleSheet(
+                "QPushButton { background: rgba(168,85,247,0.16); color: #c084fc; border: none; "
+                "border-radius: 7px; padding: 0 5px; font-size: 9px; font-weight: 800; }"
+                "QPushButton:hover { background: rgba(168,85,247,0.30); color: #ffffff; }"
+            )
+            btn_snip.clicked.connect(self._launch_screen_snip)
+            quick_row.addWidget(btn_snip)
+
+            btn_focus = QPushButton("Focus")
+            btn_focus.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn_focus.setFixedHeight(20)
+            btn_focus.setMinimumWidth(38)
+            btn_focus.setToolTip("1-click Focus Mode: 25m Pomodoro + silence notch toasts")
+            btn_focus.setStyleSheet(
+                "QPushButton { background: rgba(48,209,88,0.14); color: #30d158; border: none; "
+                "border-radius: 7px; padding: 0 5px; font-size: 9px; font-weight: 800; }"
+                "QPushButton:hover { background: rgba(48,209,88,0.28); color: #ffffff; }"
+            )
+            btn_focus.clicked.connect(self._toggle_focus_mode)
+            quick_row.addWidget(btn_focus)
             cal_col.addLayout(quick_row)
 
             ev_row = QHBoxLayout()
@@ -4968,7 +5287,14 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             self._chat_input.clear()
             self._submit_prompt(q, speak_reply=False)
 
-        def _submit_prompt(self, query: str, *, speak_reply: bool = False) -> None:
+        def _submit_prompt(
+            self,
+            query: str,
+            *,
+            speak_reply: bool = False,
+            extra_media_bytes: bytes | None = None,
+            extra_mime_type: str | None = None,
+        ) -> None:
             self.service._busy = True
             if not self._has_messages:
                 self._has_messages = True
@@ -4985,7 +5311,11 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                     loop = self.service._get_async_loop()
                     fut = asyncio.run_coroutine_threadsafe(
                         self.service.submit_query_async(
-                            query, auto_see=see_now, speak_reply=speak_reply
+                            query,
+                            auto_see=see_now,
+                            speak_reply=speak_reply,
+                            extra_media_bytes=extra_media_bytes,
+                            extra_mime_type=extra_mime_type,
                         ),
                         loop,
                     )

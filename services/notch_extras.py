@@ -1004,3 +1004,416 @@ def get_display_brightness_sync() -> int | None:
     except Exception:
         pass
     return None
+
+
+# ---------------------------------------------------------------------------
+# 9. Caps Lock / Num Lock Instant State (Win32 GetKeyState — < 0.05ms)
+# ---------------------------------------------------------------------------
+
+def get_lock_key_states() -> tuple[bool, bool]:
+    """Return (caps_lock_on, num_lock_on) via Win32 GetKeyState."""
+    if os.name != "nt":
+        return False, False
+    try:
+        u32 = ctypes.windll.user32
+        caps = bool(u32.GetKeyState(0x14) & 0x0001)
+        num = bool(u32.GetKeyState(0x90) & 0x0001)
+        return caps, num
+    except Exception:
+        return False, False
+
+
+# ---------------------------------------------------------------------------
+# 10. Non-Blocking Display Brightness Tracker (auto-disables on desktops)
+# ---------------------------------------------------------------------------
+
+class BrightnessTracker:
+    """Polls laptop display brightness in a background thread and reports changes."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._supported: bool | None = None
+        self._last_val: int | None = None
+        self._changed_val: int | None = None
+        self._last_poll: float = 0.0
+        self._polling: bool = False
+
+    def pop_changed_brightness(self) -> int | None:
+        now = time.time()
+        with self._lock:
+            val = self._changed_val
+            self._changed_val = None
+            should_poll = (
+                self._supported is not False
+                and not self._polling
+                and (now - self._last_poll) >= 1.2
+            )
+            if should_poll:
+                self._polling = True
+                self._last_poll = now
+        if should_poll:
+            threading.Thread(target=self._poll_bg, daemon=True).start()
+        return val
+
+    def _poll_bg(self) -> None:
+        try:
+            b = get_display_brightness_sync()
+            with self._lock:
+                if b is None:
+                    self._supported = False
+                else:
+                    self._supported = True
+                    if self._last_val is not None and b != self._last_val:
+                        self._changed_val = b
+                    self._last_val = b
+        finally:
+            with self._lock:
+                self._polling = False
+
+
+# ---------------------------------------------------------------------------
+# 11. Network / Wi-Fi Drop & Live Speed Tracker (Win32 wininet + iphlpapi)
+# ---------------------------------------------------------------------------
+
+class _MIB_IFROW(ctypes.Structure):
+    _fields_ = [
+        ("wszName", ctypes.c_wchar * 256),
+        ("dwIndex", wt.DWORD),
+        ("dwType", wt.DWORD),
+        ("dwMtu", wt.DWORD),
+        ("dwSpeed", wt.DWORD),
+        ("dwPhysAddrLen", wt.DWORD),
+        ("bPhysAddr", ctypes.c_ubyte * 8),
+        ("dwAdminStatus", wt.DWORD),
+        ("dwOperStatus", wt.DWORD),
+        ("dwLastChange", wt.DWORD),
+        ("dwInOctets", wt.DWORD),
+        ("dwInUcastPkts", wt.DWORD),
+        ("dwInNUcastPkts", wt.DWORD),
+        ("dwInDiscards", wt.DWORD),
+        ("dwInErrors", wt.DWORD),
+        ("dwInUnknownProtos", wt.DWORD),
+        ("dwOutOctets", wt.DWORD),
+        ("dwOutUcastPkts", wt.DWORD),
+        ("dwOutNUcastPkts", wt.DWORD),
+        ("dwOutDiscards", wt.DWORD),
+        ("dwOutErrors", wt.DWORD),
+        ("dwOutQLen", wt.DWORD),
+        ("dwDescrLen", wt.DWORD),
+        ("bDescr", ctypes.c_ubyte * 256),
+    ]
+
+
+def _get_net_bytes_total() -> tuple[int, int]:
+    """Sum active non-loopback network interface rx/tx bytes via Win32 iphlpapi.GetIfTable (<0.5ms)."""
+    if os.name != "nt":
+        return 0, 0
+    try:
+        iph = ctypes.windll.iphlpapi
+        size = wt.DWORD(0)
+        iph.GetIfTable(None, ctypes.byref(size), False)
+        if size.value <= 0 or size.value > 2_000_000:
+            return 0, 0
+        buf = ctypes.create_string_buffer(size.value)
+        if iph.GetIfTable(buf, ctypes.byref(size), False) != 0:
+            return 0, 0
+        num = ctypes.cast(buf, ctypes.POINTER(wt.DWORD))[0]
+        row_size = ctypes.sizeof(_MIB_IFROW)
+        base_addr = ctypes.addressof(buf) + 4
+        rx, tx = 0, 0
+        for i in range(min(num, 64)):
+            row = _MIB_IFROW.from_address(base_addr + i * row_size)
+            if row.dwType == 24:  # MIB_IF_TYPE_LOOPBACK
+                continue
+            if row.dwOperStatus >= 4:  # Operational / Connected
+                rx += int(row.dwInOctets)
+                tx += int(row.dwOutOctets)
+        return rx, tx
+    except Exception:
+        return 0, 0
+
+
+def _is_internet_connected() -> bool:
+    if os.name != "nt":
+        return True
+    try:
+        flags = wt.DWORD(0)
+        return bool(ctypes.windll.wininet.InternetGetConnectedState(ctypes.byref(flags), 0))
+    except Exception:
+        return True
+
+
+def _fmt_rate(bps: float) -> str:
+    if bps >= 1_048_576:
+        return f"{bps / 1_048_576:.1f} MB/s"
+    if bps >= 1024:
+        return f"{bps / 1024:.0f} KB/s"
+    return f"{int(max(0.0, bps))} B/s"
+
+
+class NetworkTracker:
+    """Tracks Wi-Fi/Internet drop & reconnect events plus live download/upload speed."""
+
+    def __init__(self) -> None:
+        self._last_online: bool | None = None
+        self._last_rx: int = 0
+        self._last_tx: int = 0
+        self._last_ts: float = 0.0
+        self._down_bps: float = 0.0
+        self._up_bps: float = 0.0
+
+    def poll(self) -> dict[str, Any]:
+        """Fast (<0.5ms) poll returning online state, transition event, and formatted speed."""
+        now = time.time()
+        if now - self._last_ts < 1.0:
+            return {
+                "online": self._last_online if self._last_online is not None else True,
+                "event": "",
+                "down_text": _fmt_rate(self._down_bps),
+                "up_text": _fmt_rate(self._up_bps),
+                "down_bps": self._down_bps,
+            }
+        online = _is_internet_connected()
+        event = ""
+        if self._last_online is not None and online != self._last_online:
+            event = "reconnected" if online else "offline"
+        self._last_online = online
+
+        rx, tx = _get_net_bytes_total()
+        if self._last_ts > 0.0:
+            dt = max(0.2, now - self._last_ts)
+            if rx >= self._last_rx:
+                self._down_bps = (rx - self._last_rx) / dt
+            if tx >= self._last_tx:
+                self._up_bps = (tx - self._last_tx) / dt
+        self._last_rx = rx
+        self._last_tx = tx
+        self._last_ts = now
+        return {
+            "online": online,
+            "event": event,
+            "down_text": _fmt_rate(self._down_bps),
+            "up_text": _fmt_rate(self._up_bps),
+            "down_bps": self._down_bps,
+        }
+
+
+# ---------------------------------------------------------------------------
+# 12. Bluetooth Device Connect / Disconnect & Battery Tracker (Background)
+# ---------------------------------------------------------------------------
+
+_PS_BT_SCRIPT = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+Get-PnpDevice -Class Bluetooth -PresentOnly | ForEach-Object {
+    $c = (Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName '{83DA6326-97A6-4088-9453-A1923F573B29} 15').Data
+    if ($c -eq $true) {
+        $b = (Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName '{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2').Data
+        $nm = [string]$_.FriendlyName
+        if ($nm -and $nm -notmatch 'Microsoft Bluetooth|Enumerator|Adapter|Radio|LE Generic') {
+            Write-Output ("{0}|{1}" -f $nm, $(if ($null -ne $b) { [int]$b } else { -1 }))
+        }
+    }
+}
+""".strip()
+
+
+class BluetoothTracker:
+    """Detects Bluetooth audio/controller connect & disconnect events + battery % in background."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._connected: dict[str, int] | None = None
+        self._pending_event: dict[str, Any] | None = None
+        self._last_poll: float = 0.0
+        self._polling: bool = False
+        import base64
+        self._enc = base64.b64encode(_PS_BT_SCRIPT.encode("utf-16le")).decode("ascii")
+
+    def pop_event(self) -> dict[str, Any] | None:
+        now = time.time()
+        with self._lock:
+            ev = self._pending_event
+            self._pending_event = None
+            should_poll = (not self._polling) and (now - self._last_poll >= 4.5)
+            if should_poll:
+                self._polling = True
+                self._last_poll = now
+        if should_poll and os.name == "nt":
+            threading.Thread(target=self._poll_bg, daemon=True).start()
+        return ev
+
+    def _poll_bg(self) -> None:
+        try:
+            res = subprocess.run(
+                ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-EncodedCommand", self._enc],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            cur: dict[str, int] = {}
+            for ln in (res.stdout or "").splitlines():
+                parts = ln.strip().split("|", 1)
+                if len(parts) == 2 and parts[0]:
+                    name = parts[0].strip()
+                    try:
+                        batt = int(parts[1].strip())
+                    except ValueError:
+                        batt = -1
+                    cur[name] = max(cur.get(name, -1), batt)
+            with self._lock:
+                if self._connected is not None:
+                    for nm, batt in cur.items():
+                        if nm not in self._connected:
+                            self._pending_event = {"name": nm, "connected": True, "battery": batt}
+                            break
+                    else:
+                        for nm in self._connected:
+                            if nm not in cur:
+                                self._pending_event = {"name": nm, "connected": False, "battery": -1}
+                                break
+                self._connected = cur
+        except Exception:
+            pass
+        finally:
+            with self._lock:
+                self._polling = False
+
+
+# ---------------------------------------------------------------------------
+# 13. CoreAudio Default Microphone Mute Toggle & Active Call Detector
+# ---------------------------------------------------------------------------
+
+def _mic_endpoint_mute(toggle: bool = False) -> bool:
+    """Read or toggle default capture (microphone) mute via CoreAudio IAudioEndpointVolume."""
+    if os.name != "nt":
+        return False
+    try:
+        from ctypes import POINTER, byref, c_int, c_uint, c_void_p, HRESULT
+
+        ole32 = ctypes.windll.ole32
+        ole32.CoInitialize(None)
+        clsid = _GUID.from_str("BCDE0395-E52F-467C-8E3D-C4579291692E")
+        iid_enum = _GUID.from_str("A95664D2-9614-4F35-A746-DE8DB63617E6")
+        iid_epv = _GUID.from_str("5CDF2C82-841E-4546-9722-0CF74078229A")
+
+        enum_p = c_void_p()
+        if ole32.CoCreateInstance(byref(clsid), None, 23, byref(iid_enum), byref(enum_p)) != 0 or not enum_p:
+            return False
+        vt = ctypes.cast(ctypes.cast(enum_p, POINTER(c_void_p))[0], POINTER(c_void_p))
+        get_def = ctypes.WINFUNCTYPE(HRESULT, c_void_p, c_int, c_int, POINTER(c_void_p))(vt[4])
+        rel_enum = ctypes.WINFUNCTYPE(ctypes.c_ulong, c_void_p)(vt[2])
+
+        dev_p = c_void_p()
+        if get_def(enum_p, 1, 0, byref(dev_p)) != 0 or not dev_p:  # eCapture=1, eConsole=0
+            rel_enum(enum_p)
+            return False
+        dvt = ctypes.cast(ctypes.cast(dev_p, POINTER(c_void_p))[0], POINTER(c_void_p))
+        act = ctypes.WINFUNCTYPE(HRESULT, c_void_p, POINTER(_GUID), c_uint, c_void_p, POINTER(c_void_p))(dvt[3])
+        rel_dev = ctypes.WINFUNCTYPE(ctypes.c_ulong, c_void_p)(dvt[2])
+
+        epv_p = c_void_p()
+        muted_val = False
+        if act(dev_p, byref(iid_epv), 23, None, byref(epv_p)) == 0 and epv_p:
+            evt = ctypes.cast(ctypes.cast(epv_p, POINTER(c_void_p))[0], POINTER(c_void_p))
+            set_mute = ctypes.WINFUNCTYPE(HRESULT, c_void_p, c_int, c_void_p)(evt[14])
+            get_mute = ctypes.WINFUNCTYPE(HRESULT, c_void_p, POINTER(c_int))(evt[15])
+            rel_epv = ctypes.WINFUNCTYPE(ctypes.c_ulong, c_void_p)(evt[2])
+            cur = c_int(0)
+            if get_mute(epv_p, byref(cur)) == 0:
+                muted_val = bool(cur.value)
+                if toggle:
+                    new_m = 0 if muted_val else 1
+                    if set_mute(epv_p, new_m, None) == 0:
+                        muted_val = bool(new_m)
+            rel_epv(epv_p)
+        rel_dev(dev_p)
+        rel_enum(enum_p)
+        return muted_val
+    except Exception:
+        return False
+
+
+def get_default_mic_muted() -> bool:
+    return _mic_endpoint_mute(toggle=False)
+
+
+def toggle_default_mic_mute() -> bool:
+    return _mic_endpoint_mute(toggle=True)
+
+
+class CallActivityTracker:
+    """Detects active Discord / Google Meet / Zoom / Teams calls when the microphone is live."""
+
+    _CALL_HINTS: tuple[tuple[str, str], ...] = (
+        ("discord", "Discord"),
+        ("meet.google", "Meet"),
+        ("google meet", "Meet"),
+        ("zoom meeting", "Zoom"),
+        ("zoom workplace", "Zoom"),
+        ("microsoft teams", "Teams"),
+        ("whatsapp", "WhatsApp"),
+    )
+
+    def __init__(self) -> None:
+        self._call_app: str = ""
+        self._started_ts: float = 0.0
+        self._last_scan: float = 0.0
+        self._muted: bool = False
+
+    def _detect_call_window(self) -> str:
+        if os.name != "nt":
+            return ""
+        found = [""]
+        try:
+            u32 = ctypes.windll.user32
+            EnumProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+
+            def _cb(hwnd: Any, _lp: Any) -> bool:
+                if not u32.IsWindowVisible(hwnd):
+                    return True
+                buf = ctypes.create_unicode_buffer(256)
+                if u32.GetWindowTextW(hwnd, buf, 256) > 0:
+                    low = buf.value.lower()
+                    for needle, label in self._CALL_HINTS:
+                        if needle in low:
+                            found[0] = label
+                            return False
+                return True
+
+            u32.EnumWindows(EnumProc(_cb), 0)
+        except Exception:
+            pass
+        return found[0]
+
+    def update(self, mic_active: bool) -> dict[str, Any]:
+        now = time.time()
+        if not mic_active:
+            self._call_app = ""
+            self._started_ts = 0.0
+            return {"active": False, "app": "", "duration": "", "muted": False}
+
+        if now - self._last_scan >= 1.5:
+            self._last_scan = now
+            app = self._detect_call_window()
+            if app:
+                if not self._call_app:
+                    self._started_ts = now
+                self._call_app = app
+                self._muted = get_default_mic_muted()
+            else:
+                self._call_app = ""
+                self._started_ts = 0.0
+
+        if not self._call_app:
+            return {"active": False, "app": "", "duration": "", "muted": False}
+
+        elapsed = max(0, int(now - self._started_ts))
+        m, s = divmod(elapsed, 60)
+        h, m = divmod(m, 60)
+        dur = f"{h}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
+        return {"active": True, "app": self._call_app, "duration": dur, "muted": self._muted}
+
+    def toggle_mute(self) -> bool:
+        self._muted = toggle_default_mic_mute()
+        return self._muted

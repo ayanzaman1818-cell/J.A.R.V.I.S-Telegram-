@@ -18,7 +18,7 @@ from typing import Any, Callable, Optional
 
 def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str, Any]:
     """Build and return PySide6 widget classes & idle painters sharing the overlay's squircle helper."""
-    from PySide6.QtCore import QMimeData, QPointF, QRectF, Qt, QTimer, QUrl, Signal
+    from PySide6.QtCore import QBuffer, QIODevice, QMimeData, QPointF, QRect, QRectF, Qt, QTimer, QUrl, Signal
     from PySide6.QtGui import (
         QBrush,
         QColor,
@@ -26,6 +26,7 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
         QDrag,
         QFont,
         QFontMetricsF,
+        QGuiApplication,
         QImage,
         QLinearGradient,
         QPainter,
@@ -41,6 +42,7 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
         QPushButton,
         QScrollArea,
         QStackedWidget,
+        QTextEdit,
         QVBoxLayout,
         QWidget,
     )
@@ -261,6 +263,195 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
             p.drawEllipse(QPointF(dx, cy), 4.8, 4.8)
             p.setBrush(col)
             p.drawEllipse(QPointF(dx, cy), 2.9, 2.9)
+
+    def draw_bluetooth_pill(
+        p: QPainter,
+        left: float,
+        right: float,
+        nw: float,
+        nh: float,
+        device_name: str,
+        connected: bool,
+        battery_pct: int = -1,
+    ) -> None:
+        """Draw animated Bluetooth connect/disconnect pill with vector BT rune & optional battery %."""
+        cy = nh / 2.0
+        ix = left + 15.0
+        accent = QColor("#38bdf8") if connected else QColor("#94a3b8")
+        p.setPen(QPen(accent, 1.45, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        bt = QPainterPath()
+        bt.moveTo(ix - 2.6, cy - 2.4)
+        bt.lineTo(ix + 2.6, cy + 2.4)
+        bt.lineTo(ix, cy + 4.8)
+        bt.lineTo(ix, cy - 4.8)
+        bt.lineTo(ix + 2.6, cy - 2.4)
+        bt.lineTo(ix - 2.6, cy + 2.4)
+        p.drawPath(bt)
+
+        status_txt = f"{battery_pct}%" if (connected and 0 <= battery_pct <= 100) else ("Connected" if connected else "Disconnected")
+        f_st = QFont("SF Pro Display", 7, QFont.Weight.Bold)
+        p.setFont(f_st)
+        st_w = QFontMetricsF(f_st).horizontalAdvance(status_txt) + 12.0
+
+        f_nm = QFont("SF Pro Display", 8, QFont.Weight.DemiBold)
+        p.setFont(f_nm)
+        nm_l = left + 26.0
+        nm_w = max(24.0, (right - st_w - 8.0) - nm_l)
+        elided = QFontMetricsF(f_nm).elidedText(device_name or "Bluetooth", Qt.TextElideMode.ElideRight, nm_w)
+        p.setPen(QColor("#f8fafc"))
+        p.drawText(QRectF(nm_l, 0.0, nm_w, nh), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, elided)
+
+        p.setFont(f_st)
+        p.setPen(QColor("#30d158") if (connected and battery_pct > 20) else (QColor("#ff9f0a") if connected and 0 <= battery_pct <= 20 else accent))
+        p.drawText(QRectF(right - st_w - 8.0, 0.0, st_w, nh), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, status_txt)
+
+    def draw_network_pill(
+        p: QPainter,
+        left: float,
+        right: float,
+        nw: float,
+        nh: float,
+        online: bool,
+    ) -> None:
+        """Draw sleek Wi-Fi / Internet drop (amber) or reconnect (emerald) pill."""
+        cy = nh / 2.0
+        ix = left + 16.0
+        col = QColor("#30d158") if online else QColor("#ff9f0a")
+        p.setPen(QPen(col, 1.35, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawArc(QRectF(ix - 5.5, cy - 3.6, 11.0, 11.0), 40 * 16, 100 * 16)
+        p.drawArc(QRectF(ix - 3.4, cy - 1.5, 6.8, 6.8), 40 * 16, 100 * 16)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(col)
+        p.drawEllipse(QPointF(ix, cy + 3.2), 1.3, 1.3)
+        if not online:
+            p.setPen(QPen(QColor("#ff453a"), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(QPointF(ix - 5.0, cy + 4.2), QPointF(ix + 5.0, cy - 4.2))
+
+        p.setPen(col)
+        p.setFont(QFont("SF Pro Display", 8, QFont.Weight.Bold))
+        txt = "Wi-Fi Reconnected" if online else "No Internet"
+        p.drawText(QRectF(left + 28.0, 0.0, nw - 38.0, nh), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, txt)
+
+    def draw_lockkey_pill(
+        p: QPainter,
+        left: float,
+        right: float,
+        nw: float,
+        nh: float,
+        key_name: str,
+        is_on: bool,
+    ) -> None:
+        """Draw crisp 1.2s Caps Lock / Num Lock micro-pill."""
+        cy = nh / 2.0
+        ix = left + 15.0
+        col = QColor("#38bdf8") if is_on else QColor("#94a3b8")
+        p.setPen(QPen(col, 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        up = QPainterPath()
+        up.moveTo(ix, cy - 4.2)
+        up.lineTo(ix - 4.0, cy + 0.5)
+        up.lineTo(ix - 1.7, cy + 0.5)
+        up.lineTo(ix - 1.7, cy + 3.8)
+        up.lineTo(ix + 1.7, cy + 3.8)
+        up.lineTo(ix + 1.7, cy + 0.5)
+        up.lineTo(ix + 4.0, cy + 0.5)
+        up.closeSubpath()
+        if is_on:
+            p.setBrush(QColor(56, 189, 248, 70))
+        p.drawPath(up)
+
+        p.setPen(col)
+        p.setFont(QFont("SF Pro Display", 8, QFont.Weight.ExtraBold))
+        lbl = f"{key_name} {'ON' if is_on else 'OFF'}"
+        p.drawText(QRectF(left + 26.0, 0.0, nw - 34.0, nh), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, lbl)
+
+    def draw_call_pill(
+        p: QPainter,
+        left: float,
+        right: float,
+        nw: float,
+        nh: float,
+        app_name: str,
+        dur_text: str,
+        muted: bool,
+        phase: float,
+        hovered: bool = False,
+        mute_hit: bool = False,
+    ) -> Optional[QRectF]:
+        """Draw pulsing green Active Call pill with live duration + 1-click Mute Mic button on hover."""
+        cy = nh / 2.0
+        col = QColor("#ff453a") if muted else QColor("#30d158")
+        # Left pulsing 4-bar call waveform
+        wx = left + 12.0
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(col)
+        for i in range(4):
+            amp = 0.25 if muted else (0.35 + 0.65 * abs(math.sin(phase * (1.2 + i * 0.35) + i * 1.1)))
+            bh = max(2.6, min(11.0, amp * 11.0))
+            p.drawRoundedRect(QRectF(wx + i * 3.6, cy - bh / 2.0, 2.2, bh), 1.1, 1.1)
+
+        mute_rect: Optional[QRectF] = None
+        if hovered and nh >= 28:
+            btn_sz = 20.0
+            btn_x = right - btn_sz - 9.0
+            btn_y = (nh - btn_sz) / 2.0
+            mute_rect = QRectF(btn_x, btn_y, btn_sz, btn_sz)
+
+            p.setFont(QFont("SF Pro Display", 9, QFont.Weight.DemiBold))
+            p.setPen(QColor("#e2e8f0"))
+            p.drawText(QRectF(left + 30.0, 0.0, 62.0, nh), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, app_name or "Call")
+
+            p.setFont(QFont("SF Pro Display", 9, QFont.Weight.Bold))
+            p.setPen(col)
+            p.drawText(QRectF(left + 76.0, 0.0, btn_x - (left + 76.0) - 8.0, nh), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, dur_text)
+
+            # Circular Mic Mute button
+            p.setPen(Qt.PenStyle.NoPen)
+            bg_c = QColor(255, 69, 58, 165 if mute_hit else 95) if muted else QColor(255, 255, 255, 68 if mute_hit else 30)
+            p.setBrush(bg_c)
+            p.drawEllipse(mute_rect)
+            mcx, mcy = mute_rect.center().x(), mute_rect.center().y()
+            fg_m = QColor("#ffffff") if (muted or mute_hit) else QColor("#cbd5e1")
+            p.setPen(QPen(fg_m, 1.35, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(QRectF(mcx - 2.0, mcy - 4.4, 4.0, 6.2), 2.0, 2.0)
+            p.drawArc(QRectF(mcx - 3.6, mcy - 2.0, 7.2, 6.2), 180 * 16, 180 * 16)
+            p.drawLine(QPointF(mcx, mcy + 4.2), QPointF(mcx, mcy + 5.6))
+            if muted:
+                p.setPen(QPen(QColor("#ffffff"), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(mcx - 4.5, mcy + 4.5), QPointF(mcx + 4.5, mcy - 4.5))
+        else:
+            p.setFont(QFont("SF Pro Display", 8, QFont.Weight.DemiBold))
+            p.setPen(QColor("#e2e8f0"))
+            p.drawText(QRectF(left + 29.0, 0.0, 56.0, nh), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, app_name or "Call")
+            p.setFont(QFont("SF Pro Display", 8, QFont.Weight.Bold))
+            p.setPen(col)
+            p.drawText(QRectF(left + 72.0, 0.0, nw - 82.0, nh), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, dur_text)
+        return mute_rect
+
+    def draw_color_swatch_pill(
+        p: QPainter,
+        left: float,
+        right: float,
+        nw: float,
+        nh: float,
+        hex_code: str,
+    ) -> None:
+        """Draw a colored circle swatch + copied #HEX pill after using the Eyedropper."""
+        cy = nh / 2.0
+        sw_col = QColor(hex_code) if QColor(hex_code).isValid() else QColor("#38bdf8")
+        p.setPen(QPen(QColor(255, 255, 255, 110), 1.0))
+        p.setBrush(sw_col)
+        p.drawEllipse(QPointF(left + 15.0, cy), 5.6, 5.6)
+
+        p.setPen(QColor("#ffffff"))
+        p.setFont(QFont("SF Pro Display", 8, QFont.Weight.Bold))
+        p.drawText(QRectF(left + 27.0, 0.0, nw - 76.0, nh), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, hex_code.upper())
+        p.setPen(QColor("#30d158"))
+        p.setFont(QFont("SF Pro Display", 7, QFont.Weight.Bold))
+        p.drawText(QRectF(right - 48.0, 0.0, 40.0, nh), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, "Copied")
 
     # ------------------------------------------------------------------
     # 2. Custom Vector Weather Badge Widget (for Dashboard Calendar)
@@ -544,18 +735,24 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
     # ------------------------------------------------------------------
 
     class NotchToolsPage(QWidget):
-        """4-tab pitch-black borderless Utility Hub inside the Notch."""
+        """6-tab pitch-black borderless Utility Hub inside the Notch."""
 
         go_home = Signal()
         ask_jarvis_file = Signal(str)
         start_quick_timer = Signal(int, str)
         stop_quick_timer = Signal()
+        launch_color_picker = Signal()
+        launch_screen_snip = Signal()
+        toggle_focus_mode = Signal()
 
         def __init__(self, parent: Optional[QWidget] = None) -> None:
             super().__init__(parent)
             self._shelf_files: list[str] = []
             self._clip_items: list[str] = []
             self._tab_btns: list[QPushButton] = []
+            self._note_save_timer = QTimer(self)
+            self._note_save_timer.setSingleShot(True)
+            self._note_save_timer.timeout.connect(self._save_scratchpad_disk)
 
             root = QVBoxLayout(self)
             root.setContentsMargins(6, 2, 6, 4)
@@ -563,20 +760,20 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
 
             # Top Tab Pill Bar + Back Button
             nav = QHBoxLayout()
-            nav.setSpacing(6)
-            btn_back = QPushButton("← Dashboard")
+            nav.setSpacing(5)
+            btn_back = QPushButton("← Home")
             btn_back.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             btn_back.setFixedHeight(26)
             btn_back.setStyleSheet(
                 "QPushButton { background: rgba(255,255,255,0.07); color: #cbd5e1; border: none; "
-                "border-radius: 13px; padding: 0 11px; font-size: 11px; font-weight: 700; }"
+                "border-radius: 13px; padding: 0 10px; font-size: 10.5px; font-weight: 700; }"
                 "QPushButton:hover { background: rgba(255,255,255,0.14); color: #ffffff; }"
             )
             btn_back.clicked.connect(self.go_home.emit)
             nav.addWidget(btn_back)
             nav.addStretch(1)
 
-            for idx, title in enumerate(("Shelf", "Clipboard", "Mirror", "Timer")):
+            for idx, title in enumerate(("Shelf", "Clip", "Mirror", "Timer", "Notes", "Tools")):
                 b = QPushButton(title)
                 b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
                 b.setFixedHeight(26)
@@ -591,6 +788,8 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
             self._tabs.addWidget(self._build_clipboard_tab())
             self._tabs.addWidget(self._build_mirror_tab())
             self._tabs.addWidget(self._build_timer_tab())
+            self._tabs.addWidget(self._build_notes_tab())
+            self._tabs.addWidget(self._build_quick_tools_tab())
             root.addWidget(self._tabs, stretch=1)
             self.select_tab(0)
 
@@ -815,6 +1014,339 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
             vl.addWidget(btn_stop, alignment=Qt.AlignmentFlag.AlignHCenter)
             return w
 
+        # --- Tab 4: Persistent Quick Sticky Note / Scratchpad ---
+        def _scratchpad_path(self) -> Path:
+            p = Path(__file__).resolve().parent.parent / ".cache" / "notch_scratchpad.txt"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            return p
+
+        def _build_notes_tab(self) -> QWidget:
+            w = QWidget()
+            vl = QVBoxLayout(w)
+            vl.setContentsMargins(2, 0, 2, 0)
+            vl.setSpacing(6)
+
+            self._note_edit = QTextEdit()
+            self._note_edit.setPlaceholderText("Quick scratchpad — jot a link, snippet, or idea (auto-saved)...")
+            self._note_edit.setStyleSheet(
+                "QTextEdit { background: rgba(255,255,255,0.05); color: #f1f5f9; border: none; "
+                "border-radius: 12px; padding: 8px 10px; font-size: 11.5px; }"
+            )
+            try:
+                sp = self._scratchpad_path()
+                if sp.exists():
+                    self._note_edit.setPlainText(sp.read_text(encoding="utf-8", errors="ignore"))
+            except Exception:
+                pass
+            self._note_edit.textChanged.connect(self._on_note_changed)
+            vl.addWidget(self._note_edit, stretch=1)
+
+            bar = QHBoxLayout()
+            bar.setSpacing(6)
+            self._note_status = QLabel("Auto-saved")
+            self._note_status.setStyleSheet("color: #64748b; font-size: 10px; font-weight: 600; background: transparent;")
+            bar.addWidget(self._note_status)
+            bar.addStretch(1)
+
+            b_copy = QPushButton("Copy All")
+            b_copy.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            b_copy.setFixedHeight(24)
+            b_copy.setStyleSheet(
+                "QPushButton { background: rgba(56,189,248,0.16); color: #38bdf8; border: none; "
+                "border-radius: 10px; padding: 0 10px; font-size: 10px; font-weight: 700; }"
+                "QPushButton:hover { background: rgba(56,189,248,0.30); color: #ffffff; }"
+            )
+            b_copy.clicked.connect(self._copy_scratchpad)
+            bar.addWidget(b_copy)
+
+            b_clr = QPushButton("Clear")
+            b_clr.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            b_clr.setFixedHeight(24)
+            b_clr.setStyleSheet(
+                "QPushButton { background: rgba(248,113,113,0.14); color: #f87171; border: none; "
+                "border-radius: 10px; padding: 0 10px; font-size: 10px; font-weight: 700; }"
+                "QPushButton:hover { background: rgba(248,113,113,0.28); color: #ffffff; }"
+            )
+            b_clr.clicked.connect(lambda: self._note_edit.clear())
+            bar.addWidget(b_clr)
+            vl.addLayout(bar)
+            return w
+
+        def _on_note_changed(self) -> None:
+            n = len(self._note_edit.toPlainText())
+            self._note_status.setText(f"{n} chars · saving...")
+            self._note_save_timer.start(450)
+
+        def _save_scratchpad_disk(self) -> None:
+            try:
+                txt = self._note_edit.toPlainText()
+                self._scratchpad_path().write_text(txt, encoding="utf-8")
+                self._note_status.setText(f"{len(txt)} chars · saved")
+            except Exception:
+                self._note_status.setText("Save failed")
+
+        def _copy_scratchpad(self) -> None:
+            cb = QApplication.clipboard()
+            if cb is not None:
+                cb.setText(self._note_edit.toPlainText())
+                self._note_status.setText("Copied to clipboard!")
+
+        # --- Tab 5: Quick Tools (Color Picker | Region Snip -> Ask JARVIS | Focus Mode) ---
+        def _build_quick_tools_tab(self) -> QWidget:
+            w = QWidget()
+            hl = QHBoxLayout(w)
+            hl.setContentsMargins(4, 6, 4, 6)
+            hl.setSpacing(10)
+
+            cards = (
+                (
+                    "Color Picker",
+                    "Zoomed magnifier loupe\nCopies #HEX to clipboard",
+                    "#38bdf8",
+                    "rgba(56,189,248,0.13)",
+                    "rgba(56,189,248,0.26)",
+                    self.launch_color_picker.emit,
+                ),
+                (
+                    "Snip → JARVIS",
+                    "Drag any screen region\nVision AI analyzes it live",
+                    "#a855f7",
+                    "rgba(168,85,247,0.14)",
+                    "rgba(168,85,247,0.28)",
+                    self.launch_screen_snip.emit,
+                ),
+                (
+                    "Focus Mode",
+                    "25m Pomodoro + Quiet\nMutes notch distractions",
+                    "#ff9f0a",
+                    "rgba(255,159,10,0.14)",
+                    "rgba(255,159,10,0.28)",
+                    self.toggle_focus_mode.emit,
+                ),
+            )
+            for title, sub, fg, bg, bg_h, cb in cards:
+                btn = QPushButton(f"{title}\n\n{sub}")
+                btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+                btn.setMinimumHeight(136)
+                btn.setStyleSheet(
+                    f"QPushButton {{ background: {bg}; color: {fg}; border: none; "
+                    "border-radius: 16px; padding: 12px; font-size: 11.5px; font-weight: 800; }"
+                    f"QPushButton:hover {{ background: {bg_h}; color: #ffffff; }}"
+                )
+                btn.clicked.connect(cb)
+                hl.addWidget(btn, stretch=1)
+            return w
+
+    # ------------------------------------------------------------------
+    # 5b. Fullscreen Eyedropper Color Picker & Region Snip Overlays
+    # ------------------------------------------------------------------
+
+    class ScreenColorPickerOverlay(QWidget):
+        """Fullscreen magnifier loupe that copies the #HEX color under the cursor."""
+
+        color_picked = Signal(str)
+        cancelled = Signal()
+
+        def __init__(self) -> None:
+            super().__init__(None)
+            self.setWindowFlags(
+                Qt.WindowType.FramelessWindowHint
+                | Qt.WindowType.WindowStaysOnTopHint
+                | Qt.WindowType.Tool
+            )
+            self.setMouseTracking(True)
+            self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
+            scr = QGuiApplication.primaryScreen()
+            geo = scr.geometry() if scr else QRect(0, 0, 1920, 1080)
+            self._screen_pm = scr.grabWindow(0) if scr else QPixmap(geo.size())
+            self._screen_img = self._screen_pm.toImage()
+            self._dpr = float(self._screen_pm.devicePixelRatio() or 1.0)
+            self.setGeometry(geo)
+            self._cur_pt = self.mapFromGlobal(QCursor.pos())
+            self._cur_hex = "#000000"
+
+        def _sample_hex(self, pt: QPointF) -> tuple[QColor, str]:
+            ix = max(0, min(self._screen_img.width() - 1, int(round(pt.x() * self._dpr))))
+            iy = max(0, min(self._screen_img.height() - 1, int(round(pt.y() * self._dpr))))
+            col = self._screen_img.pixelColor(ix, iy)
+            return col, col.name(QColor.NameFormat.HexRgb).upper()
+
+        def mouseMoveEvent(self, ev: Any) -> None:
+            self._cur_pt = ev.position()
+            _c, self._cur_hex = self._sample_hex(self._cur_pt)
+            self.update()
+
+        def mousePressEvent(self, ev: Any) -> None:
+            if ev.button() == Qt.MouseButton.LeftButton:
+                _c, hx = self._sample_hex(ev.position())
+                cb = QApplication.clipboard()
+                if cb is not None:
+                    cb.setText(hx)
+                self.close()
+                self.color_picked.emit(hx)
+                return
+            self.close()
+            self.cancelled.emit()
+
+        def keyPressEvent(self, ev: Any) -> None:
+            if ev.key() == Qt.Key.Key_Escape:
+                self.close()
+                self.cancelled.emit()
+
+        def paintEvent(self, _ev: Any) -> None:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            p.drawPixmap(self.rect(), self._screen_pm)
+
+            col, hx = self._sample_hex(self._cur_pt)
+            cx = float(self._cur_pt.x())
+            cy = float(self._cur_pt.y())
+            loupe_r = 46.0
+            lx = cx + 62.0 if cx + 130.0 < self.width() else cx - 62.0
+            ly = cy - 62.0 if cy - 120.0 > 0 else cy + 62.0
+
+            # Draw zoomed 9x9 pixel grid inside circular loupe
+            p.save()
+            clip = QPainterPath()
+            clip.addEllipse(QPointF(lx, ly), loupe_r, loupe_r)
+            p.setClipPath(clip)
+            cell = (loupe_r * 2.0) / 9.0
+            base_ix = int(round(cx * self._dpr))
+            base_iy = int(round(cy * self._dpr))
+            for dy in range(-4, 5):
+                for dx in range(-4, 5):
+                    sx = max(0, min(self._screen_img.width() - 1, base_ix + dx))
+                    sy = max(0, min(self._screen_img.height() - 1, base_iy + dy))
+                    p.fillRect(
+                        QRectF(lx + (dx - 0.5) * cell, ly + (dy - 0.5) * cell, cell + 0.5, cell + 0.5),
+                        self._screen_img.pixelColor(sx, sy),
+                    )
+            # Center pixel highlight box
+            p.setPen(QPen(QColor("#ffffff"), 1.6))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(QRectF(lx - cell / 2.0, ly - cell / 2.0, cell, cell))
+            p.restore()
+
+            p.setPen(QPen(QColor("#07080b"), 3.2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QPointF(lx, ly), loupe_r, loupe_r)
+            p.setPen(QPen(col, 1.8))
+            p.drawEllipse(QPointF(lx, ly), loupe_r - 1.4, loupe_r - 1.4)
+
+            # Live #HEX & RGB pill under loupe
+            pill_r = QRectF(lx - 58.0, ly + loupe_r + 8.0, 116.0, 26.0)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#07080b"))
+            p.drawRoundedRect(pill_r, 11.0, 11.0)
+            p.setBrush(col)
+            p.drawEllipse(QPointF(pill_r.left() + 14.0, pill_r.center().y()), 5.5, 5.5)
+            p.setPen(QColor("#ffffff"))
+            p.setFont(QFont("SF Pro Display", 9, QFont.Weight.Bold))
+            p.drawText(
+                QRectF(pill_r.left() + 26.0, pill_r.top(), pill_r.width() - 32.0, pill_r.height()),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                f"{hx}  ({col.red()},{col.green()},{col.blue()})",
+            )
+
+    class ScreenSnipOverlay(QWidget):
+        """Fullscreen drag-to-snip overlay — copies region to clipboard and sends to Ask JARVIS."""
+
+        region_snipped = Signal(bytes)
+        cancelled = Signal()
+
+        def __init__(self) -> None:
+            super().__init__(None)
+            self.setWindowFlags(
+                Qt.WindowType.FramelessWindowHint
+                | Qt.WindowType.WindowStaysOnTopHint
+                | Qt.WindowType.Tool
+            )
+            self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
+            scr = QGuiApplication.primaryScreen()
+            geo = scr.geometry() if scr else QRect(0, 0, 1920, 1080)
+            self._screen_pm = scr.grabWindow(0) if scr else QPixmap(geo.size())
+            self._dpr = float(self._screen_pm.devicePixelRatio() or 1.0)
+            self.setGeometry(geo)
+            self._start_pt: Optional[QPointF] = None
+            self._end_pt: Optional[QPointF] = None
+
+        def mousePressEvent(self, ev: Any) -> None:
+            if ev.button() == Qt.MouseButton.LeftButton:
+                self._start_pt = ev.position()
+                self._end_pt = ev.position()
+                self.update()
+                return
+            self.close()
+            self.cancelled.emit()
+
+        def mouseMoveEvent(self, ev: Any) -> None:
+            if self._start_pt is not None:
+                self._end_pt = ev.position()
+                self.update()
+
+        def mouseReleaseEvent(self, ev: Any) -> None:
+            if self._start_pt is None or self._end_pt is None:
+                self.close()
+                self.cancelled.emit()
+                return
+            r = QRectF(self._start_pt, self._end_pt).normalized()
+            self.close()
+            if r.width() < 12 or r.height() < 12:
+                self.cancelled.emit()
+                return
+            crop_rect = QRect(
+                int(round(r.left() * self._dpr)),
+                int(round(r.top() * self._dpr)),
+                max(1, int(round(r.width() * self._dpr))),
+                max(1, int(round(r.height() * self._dpr))),
+            )
+            cropped = self._screen_pm.copy(crop_rect)
+            cb = QApplication.clipboard()
+            if cb is not None:
+                cb.setPixmap(cropped)
+            buf = QBuffer()
+            buf.open(QIODevice.OpenModeFlag.WriteOnly)
+            cropped.save(buf, "JPG", 88)
+            jpg_bytes = bytes(buf.data())
+            buf.close()
+            self.region_snipped.emit(jpg_bytes)
+
+        def keyPressEvent(self, ev: Any) -> None:
+            if ev.key() == Qt.Key.Key_Escape:
+                self.close()
+                self.cancelled.emit()
+
+        def paintEvent(self, _ev: Any) -> None:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            p.drawPixmap(self.rect(), self._screen_pm)
+            p.fillRect(self.rect(), QColor(5, 7, 11, 130))
+
+            if self._start_pt is not None and self._end_pt is not None:
+                r = QRectF(self._start_pt, self._end_pt).normalized()
+                if r.width() > 2 and r.height() > 2:
+                    src = QRectF(r.left() * self._dpr, r.top() * self._dpr, r.width() * self._dpr, r.height() * self._dpr)
+                    p.drawPixmap(r, self._screen_pm, src)
+                    p.setPen(QPen(QColor("#38bdf8"), 2.0))
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.drawRect(r)
+                    dim_txt = f"{int(r.width())} × {int(r.height())}"
+                    badge = QRectF(r.left(), max(8.0, r.top() - 26.0), 92.0, 22.0)
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.setBrush(QColor("#07080b"))
+                    p.drawRoundedRect(badge, 8.0, 8.0)
+                    p.setPen(QColor("#38bdf8"))
+                    p.setFont(QFont("SF Pro Display", 9, QFont.Weight.Bold))
+                    p.drawText(badge, Qt.AlignmentFlag.AlignCenter, dim_txt)
+            else:
+                hint = QRectF((self.width() - 290.0) / 2.0, 32.0, 290.0, 30.0)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor("#07080b"))
+                p.drawRoundedRect(hint, 15.0, 15.0)
+                p.setPen(QColor("#f8fafc"))
+                p.setFont(QFont("SF Pro Display", 10, QFont.Weight.DemiBold))
+                p.drawText(hint, Qt.AlignmentFlag.AlignCenter, "Drag to snip region → Ask J.A.R.V.I.S. (Esc cancels)")
+
     # ------------------------------------------------------------------
     # 6. Synced Live Lyrics Card Page (Click Album Cover)
     # ------------------------------------------------------------------
@@ -989,6 +1521,7 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
         def __init__(self, parent: Optional[QWidget] = None) -> None:
             super().__init__(parent)
             self.sync_offset_sec: float = 0.0
+            self._ambient_bg_pm: Optional[QPixmap] = None
             root = QVBoxLayout(self)
             root.setContentsMargins(8, 4, 8, 6)
             root.setSpacing(5)
@@ -1058,6 +1591,33 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
 
         def _nudge_offset(self, delta: float) -> None:
             self.sync_offset_sec = max(-5.0, min(5.0, self.sync_offset_sec + delta))
+
+        def set_album_pixmap(self, pm: Optional[QPixmap]) -> None:
+            """Create an Apple Music-style softly blurred ultra-dark ambient album art backdrop."""
+            if pm is None or pm.isNull():
+                self._ambient_bg_pm = None
+                self.update()
+                return
+            try:
+                # Downscale to 24x24 then smooth-upscale -> instant, zero-cost Gaussian-like ambient blur!
+                tiny = pm.scaled(24, 24, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                self._ambient_bg_pm = tiny.scaled(240, 120, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            except Exception:
+                self._ambient_bg_pm = None
+            self.update()
+
+        def paintEvent(self, ev: Any) -> None:
+            if self._ambient_bg_pm is not None and not self._ambient_bg_pm.isNull():
+                p = QPainter(self)
+                p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+                clip = QPainterPath()
+                clip.addRoundedRect(QRectF(self.rect().adjusted(2, 0, -2, 0)), 18.0, 18.0)
+                p.setClipPath(clip)
+                p.setOpacity(0.13)
+                p.drawPixmap(self.rect(), self._ambient_bg_pm)
+                p.setOpacity(1.0)
+            super().paintEvent(ev)
 
         def set_lyrics(
             self,
@@ -1140,8 +1700,15 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
         "draw_battery_pill": draw_battery_pill,
         "draw_download_pill": draw_download_pill,
         "draw_privacy_dots": draw_privacy_dots,
+        "draw_bluetooth_pill": draw_bluetooth_pill,
+        "draw_network_pill": draw_network_pill,
+        "draw_lockkey_pill": draw_lockkey_pill,
+        "draw_call_pill": draw_call_pill,
+        "draw_color_swatch_pill": draw_color_swatch_pill,
         "WeatherBadgeWidget": WeatherBadgeWidget,
         "NotchToolsPage": NotchToolsPage,
         "NotchLyricsPage": NotchLyricsPage,
         "NotchToastPage": NotchToastPage,
+        "ScreenColorPickerOverlay": ScreenColorPickerOverlay,
+        "ScreenSnipOverlay": ScreenSnipOverlay,
     }
