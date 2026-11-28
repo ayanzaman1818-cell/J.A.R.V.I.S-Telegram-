@@ -1993,8 +1993,8 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
                 self._ambient_bg_pm = None
                 return
             try:
-                tiny = pm.scaled(24, 24, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
-                self._ambient_bg_pm = tiny.scaled(320, 180, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                tiny = pm.scaled(28, 28, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+                self._ambient_bg_pm = tiny.scaled(320, 320, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
             except Exception:
                 self._ambient_bg_pm = None
 

@@ -3597,33 +3597,29 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             p.drawPath(path)
 
             if nh > 60:
-                # Full edge-to-edge ambient blurred album backdrop when Lyrics card is open (zero black border!)
-                if self.state == "lyrics" and hasattr(self, "_lyrics_page"):
+                # Full edge-to-edge ambient blurred album cover across the WHOLE notch (Lyrics & Dashboard with music!)
+                show_album_bg = (
+                    (self.state == "lyrics")
+                    or (self.state == "dashboard" and getattr(self, "_media_panel_expanded", False))
+                )
+                if show_album_bg and hasattr(self, "_lyrics_page"):
                     bg_pm = getattr(self._lyrics_page, "_ambient_bg_pm", None)
                     if bg_pm is not None and not bg_pm.isNull():
                         p.save()
                         p.setClipPath(path)
                         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-                        p.setOpacity(0.18)
-                        p.drawPixmap(QRectF(left - ear, 0.0, nw + ear * 2.0, nh), bg_pm, QRectF(0.0, 0.0, float(bg_pm.width()), float(bg_pm.height())))
+                        full_w = nw + ear * 2.0
+                        full_h = nh
+                        # True aspect-fill center crop so album cover fills 100% of the notch with zero stretching
+                        pw_b, ph_b = float(bg_pm.width()), float(bg_pm.height())
+                        scale = max(full_w / max(1.0, pw_b), full_h / max(1.0, ph_b))
+                        sw_b = full_w / scale
+                        sh_b = full_h / scale
+                        src_r = QRectF((pw_b - sw_b) / 2.0, (ph_b - sh_b) / 2.0, sw_b, sh_b)
+                        p.setOpacity(0.20 if self.state == "lyrics" else 0.14)
+                        p.drawPixmap(QRectF(left - ear, 0.0, full_w, full_h), bg_pm, src_r)
                         p.setOpacity(1.0)
                         p.restore()
-                # Subtle album-art ambient tint strictly inside the left Now Playing card (zero outer glow!)
-                elif self.state == "dashboard" and getattr(self, "_media_panel_expanded", False):
-                    pal = self.service._current_art_palette or [(56, 189, 248)]
-                    c0 = QColor(*pal[0])
-                    p.save()
-                    p.setClipPath(path)
-                    card_cx = left + 125.0
-                    card_cy = nh * 0.52
-                    rg = QRadialGradient(QPointF(card_cx, card_cy), 132.0)
-                    rg.setColorAt(0.0, QColor(c0.red(), c0.green(), c0.blue(), 26))
-                    rg.setColorAt(0.65, QColor(c0.red(), c0.green(), c0.blue(), 10))
-                    rg.setColorAt(1.0, QColor(c0.red(), c0.green(), c0.blue(), 0))
-                    p.setPen(Qt.PenStyle.NoPen)
-                    p.setBrush(QBrush(rg))
-                    p.drawRect(QRectF(left, 0.0, 260.0, nh))
-                    p.restore()
             elif self.state in ("idle", "hover") and time.time() < getattr(self, "_color_until", 0.0) and nh >= 14:
                 p.save()
                 p.setClipPath(path)
