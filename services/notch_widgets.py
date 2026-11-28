@@ -380,32 +380,55 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
         hovered: bool = False,
         mute_hit: bool = False,
     ) -> Optional[QRectF]:
-        """Draw pulsing green Active Call pill with live duration + 1-click Mute Mic button on hover."""
+        """Draw iPhone Dynamic Island-style Active Call pill:
+        Left: Green phone handset icon + live duration | Right: Pulsing green waveform (+ Mute Mic button on hover).
+        """
         cy = nh / 2.0
         col = QColor("#ff453a") if muted else QColor("#30d158")
-        # Left pulsing 4-bar call waveform
-        wx = left + 12.0
+
+        # 1. Left: Crisp Apple-style vector phone handset icon
+        px = left + 15.0
+        p.save()
+        p.translate(px, cy)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(col)
-        for i in range(4):
-            amp = 0.25 if muted else (0.35 + 0.65 * abs(math.sin(phase * (1.2 + i * 0.35) + i * 1.1)))
-            bh = max(2.6, min(11.0, amp * 11.0))
-            p.drawRoundedRect(QRectF(wx + i * 3.6, cy - bh / 2.0, 2.2, bh), 1.1, 1.1)
+        handset = QPainterPath()
+        # Smooth tilted classic phone receiver silhouette (-5..+5)
+        handset.moveTo(-4.4, -2.6)
+        handset.cubicTo(-4.8, -3.6, -3.6, -4.8, -2.4, -4.4)
+        handset.lineTo(-1.1, -3.1)
+        handset.cubicTo(-0.7, -2.7, -0.8, -2.0, -1.3, -1.6)
+        handset.cubicTo(-0.6, -0.4, 0.4, 0.6, 1.6, 1.3)
+        handset.cubicTo(2.0, 0.8, 2.7, 0.7, 3.1, 1.1)
+        handset.lineTo(4.4, 2.4)
+        handset.cubicTo(4.8, 3.6, 3.6, 4.8, 2.6, 4.4)
+        handset.cubicTo(-1.0, 3.3, -3.3, 1.0, -4.4, -2.6)
+        handset.closeSubpath()
+        p.drawPath(handset)
+        p.restore()
 
+        # 2. Left-center: Live call duration in green right beside the phone icon
+        p.setFont(QFont("SF Pro Display", 9 if hovered else 8, QFont.Weight.Bold))
+        p.setPen(col)
+        p.drawText(
+            QRectF(left + 25.0, 0.0, 62.0, nh),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            dur_text or "0:00",
+        )
+
+        # 3. Right: Pulsing 5-bar green waveform (+ circular Mute Mic button on hover)
         mute_rect: Optional[QRectF] = None
+        bar_w = 2.2
+        gap = 2.0
+        n_bars = 5
+        wave_w = n_bars * bar_w + (n_bars - 1) * gap
+
         if hovered and nh >= 28:
             btn_sz = 20.0
             btn_x = right - btn_sz - 9.0
             btn_y = (nh - btn_sz) / 2.0
             mute_rect = QRectF(btn_x, btn_y, btn_sz, btn_sz)
-
-            p.setFont(QFont("SF Pro Display", 9, QFont.Weight.DemiBold))
-            p.setPen(QColor("#e2e8f0"))
-            p.drawText(QRectF(left + 30.0, 0.0, 62.0, nh), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, app_name or "Call")
-
-            p.setFont(QFont("SF Pro Display", 9, QFont.Weight.Bold))
-            p.setPen(col)
-            p.drawText(QRectF(left + 76.0, 0.0, btn_x - (left + 76.0) - 8.0, nh), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, dur_text)
+            wave_x = btn_x - wave_w - 9.0
 
             # Circular Mic Mute button
             p.setPen(Qt.PenStyle.NoPen)
@@ -423,12 +446,17 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
                 p.setPen(QPen(QColor("#ffffff"), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
                 p.drawLine(QPointF(mcx - 4.5, mcy + 4.5), QPointF(mcx + 4.5, mcy - 4.5))
         else:
-            p.setFont(QFont("SF Pro Display", 8, QFont.Weight.DemiBold))
-            p.setPen(QColor("#e2e8f0"))
-            p.drawText(QRectF(left + 29.0, 0.0, 56.0, nh), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, app_name or "Call")
-            p.setFont(QFont("SF Pro Display", 8, QFont.Weight.Bold))
-            p.setPen(col)
-            p.drawText(QRectF(left + 72.0, 0.0, nw - 82.0, nh), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, dur_text)
+            wave_x = right - wave_w - 11.0
+
+        shapes = (0.62, 0.90, 1.00, 0.88, 0.58)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(col)
+        max_bh = 12.0 if hovered else 10.5
+        for i in range(n_bars):
+            amp = 0.22 if muted else (0.32 + 0.68 * abs(math.sin(phase * (1.15 + i * 0.28) + i * 1.15)))
+            bh = max(2.4, min(max_bh, amp * shapes[i] * max_bh))
+            p.drawRoundedRect(QRectF(wave_x + i * (bar_w + gap), cy - bh / 2.0, bar_w, bh), 1.1, 1.1)
+
         return mute_rect
 
     def draw_color_swatch_pill(

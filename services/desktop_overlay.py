@@ -3228,7 +3228,7 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             else:
                 key = new_state
             tw, th = self.SIZES.get(key, self.SIZES["idle"])
-            if key in ("idle_music", "idle_clock", "idle_music_clock", "hover_music", "hover_clock", "hover_music_clock") and (
+            if key in ("idle_music", "idle_clock", "idle_music_clock", "hover_music", "hover_clock", "hover_music_clock", "idle_call", "hover_call") and (
                 getattr(self, "_priv_mic", False) or getattr(self, "_priv_cam", False)
             ):
                 tw += 20
@@ -3644,8 +3644,9 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
             elif self.state in ("idle", "hover") and getattr(self, "_call_active", False) and nh >= 14:
                 p.save()
                 p.setClipPath(path)
+                priv_slot = 20.0 if (getattr(self, "_priv_mic", False) or getattr(self, "_priv_cam", False)) else 0.0
                 self._hover_call_mute_rect = _EXTRAS["draw_call_pill"](
-                    p, left, right, nw, nh,
+                    p, left, right - priv_slot, nw - priv_slot, nh,
                     getattr(self, "_call_app", "Call"),
                     getattr(self, "_call_dur", "0:00"),
                     bool(getattr(self, "_call_muted", False)),
