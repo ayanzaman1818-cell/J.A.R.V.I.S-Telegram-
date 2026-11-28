@@ -3064,19 +3064,30 @@ def _create_qt_notch_window(service: DesktopOverlayService) -> Any:
                 self._call_dur = str(c_st.get("duration") or "")
                 self._call_muted = bool(c_st.get("muted"))
                 if self._call_active:
-                    # Exact same 6-bar 60fps real-dB visualizer engine as the Music Notch, driven by your live mic!
+                    # Dual-voice 6-bar 60fps real-dB visualizer (exact Music Notch engine):
+                    # Bars 0..2 (Green) = YOUR microphone voice | Bars 3..5 (Orange) = OTHER PERSON'S audio output!
                     mic_pk = 0.0 if self._call_muted else float(self.service._mic_meter.get_peak())
                     if mic_pk > 1e-4:
                         mic_db = 20.0 * math.log10(mic_pk)
-                        v_lvl = max(0.0, min(1.0, (mic_db + 42.0) / 42.0))
+                        my_lvl = max(0.0, min(1.0, (mic_db + 42.0) / 42.0))
                     else:
-                        v_lvl = 0.0
-                    self._call_phase = (self._call_phase + 0.12 + v_lvl * 0.20) % 1000.0
-                    c_shapes = (0.76, 0.94, 1.00, 0.92, 0.82, 0.70)
+                        my_lvl = 0.0
+
+                    out_pk = max(0.0, min(1.0, float(self.service._audio_meter.get_peak())))
+                    if out_pk > 1e-4:
+                        out_db = 20.0 * math.log10(out_pk)
+                        other_lvl = max(0.0, min(1.0, (out_db + 42.0) / 42.0))
+                    else:
+                        other_lvl = 0.0
+
+                    peak_lvl = max(my_lvl, other_lvl)
+                    self._call_phase = (self._call_phase + 0.12 + peak_lvl * 0.20) % 1000.0
+                    c_shapes = (0.76, 0.96, 1.00, 0.96, 0.88, 0.72)
                     c_offs = (0.0, 1.15, 2.35, 0.75, 1.95, 3.15)
                     for i in range(len(self._call_bars)):
+                        src_lvl = my_lvl if i < 3 else other_lvl
                         wave = 0.35 + 0.65 * abs(math.sin(self._call_phase * (0.95 + i * 0.15) + c_offs[i]))
-                        tgt = max(0.08, min(1.0, v_lvl * c_shapes[i] * wave))
+                        tgt = max(0.08, min(1.0, src_lvl * c_shapes[i] * wave))
                         prev_b = self._call_bars[i]
                         if tgt > prev_b:
                             self._call_bars[i] = prev_b * 0.38 + tgt * 0.62

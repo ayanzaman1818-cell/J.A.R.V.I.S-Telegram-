@@ -451,26 +451,35 @@ def build_notch_extra_widgets(make_squircle_fn: Callable[..., Any]) -> dict[str,
             wave_x = right - wave_w - 10.0
 
         max_bar_h = max(10.0, nh - 6.0)
-        bar_grad = QLinearGradient(wave_x, cy - max_bar_h / 2.0, wave_x + wave_w, cy + max_bar_h / 2.0)
+        # Dual-voice unified 6-bar visualizer:
+        # Bars 0..2 = Green (your voice, or red/flat when muted) | Bars 3..5 = Orange (other person's voice)
+        my_grad = QLinearGradient(wave_x, cy - max_bar_h / 2.0, wave_x, cy + max_bar_h / 2.0)
         if muted:
-            bar_grad.setColorAt(0.0, QColor("#ff453a"))
-            bar_grad.setColorAt(1.0, QColor("#ff6961"))
-            glow_c = QColor(255, 69, 58, 75)
+            my_grad.setColorAt(0.0, QColor("#ff453a"))
+            my_grad.setColorAt(1.0, QColor("#ff6961"))
+            my_glow = QColor(255, 69, 58, 70)
         else:
-            bar_grad.setColorAt(0.0, QColor("#22c55e"))
-            bar_grad.setColorAt(0.5, QColor("#30d158"))
-            bar_grad.setColorAt(1.0, QColor("#4ade80"))
-            glow_c = QColor(48, 209, 88, 85)
+            my_grad.setColorAt(0.0, QColor("#4ade80"))
+            my_grad.setColorAt(0.5, QColor("#30d158"))
+            my_grad.setColorAt(1.0, QColor("#22c55e"))
+            my_glow = QColor(48, 209, 88, 85)
+
+        other_grad = QLinearGradient(wave_x, cy - max_bar_h / 2.0, wave_x, cy + max_bar_h / 2.0)
+        other_grad.setColorAt(0.0, QColor("#ffb340"))
+        other_grad.setColorAt(0.5, QColor("#ff9f0a"))
+        other_grad.setColorAt(1.0, QColor("#f97316"))
+        other_glow = QColor(255, 159, 10, 88)
 
         p.setPen(Qt.PenStyle.NoPen)
         for i, amp in enumerate(bars):
+            is_mine = i < 3
             bx = wave_x + i * (bar_w + gap)
-            bh = 2.2 if muted else max(2.2, min(max_bar_h, float(amp) * max_bar_h))
+            bh = 2.2 if (is_mine and muted) else max(2.2, min(max_bar_h, float(amp) * max_bar_h))
             by = cy - bh / 2.0
-            # Soft blurry green halo + crisp inner bar (identical to Music Notch visualizer!)
-            p.setBrush(glow_c)
+            # Soft blurry color halo + crisp inner bar (identical to Music Notch visualizer!)
+            p.setBrush(my_glow if is_mine else other_glow)
             p.drawRoundedRect(QRectF(bx - 1.0, by - 1.0, bar_w + 2.0, bh + 2.0), 1.9, 1.9)
-            p.setBrush(QBrush(bar_grad))
+            p.setBrush(QBrush(my_grad if is_mine else other_grad))
             p.drawRoundedRect(QRectF(bx, by, bar_w, bh), 1.3, 1.3)
 
         return mute_rect
